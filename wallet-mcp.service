@@ -1,0 +1,17 @@
+[Unit]
+Description=wallet-mcp: Apple Wallet pass signing MCP server
+After=network.target
+
+[Service]
+Type=simple
+User=arsh
+Group=arsh
+WorkingDirectory=/home/arsh/projects/wallet-mcp
+ExecStart=/home/arsh/projects/wallet-mcp/.venv/bin/python /home/arsh/projects/wallet-mcp/server.py
+Environment=PORT=8400
+Environment=WALLET_MCP_PUBLIC_URL=https://vps.arshwaraich.com/wallet-mcp
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

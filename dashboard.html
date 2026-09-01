@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>wallet-mcp · vps.arshwaraich.com</title>
+<style>
+:root{
+  --bg:#121211; --surface-1:#1a1a19; --surface-2:#232321; --line:#32322f;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8a897f;
+  --accent:#c98500; --up:#199e70; --down:#e66767; --warn:#d1a53e; --link:#3987e5;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text-primary);
+  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  min-height:100vh;
+}
+main{width:100%; max-width:920px; margin:0 auto; padding:48px 22px 60px}
+header{margin-bottom:30px; display:flex; align-items:baseline; justify-content:space-between; gap:16px; flex-wrap:wrap}
+h1{margin:0; font-size:22px; font-weight:600; letter-spacing:-.015em}
+h1 .dot{color:var(--accent)}
+h1 a{color:inherit; text-decoration:none}
+header p{margin:6px 0 0; color:var(--text-muted); font-size:13px}
+.refresh{color:var(--text-muted); font-size:12.5px; font-variant-numeric:tabular-nums}
+
+.tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:28px}
+.tile{background:var(--surface-1); border:1px solid var(--line); border-radius:12px; padding:16px 18px}
+.tile .label{color:var(--text-muted); font-size:11.5px; letter-spacing:.05em; text-transform:uppercase}
+.tile .value{margin-top:8px; font-size:26px; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.02em}
+.tile .sub{margin-top:4px; color:var(--text-secondary); font-size:12.5px; font-variant-numeric:tabular-nums}
+
+section{margin-bottom:28px}
+section h2{font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin:0 0 12px}
+
+.bars{display:flex; flex-direction:column; gap:8px}
+.barrow{display:flex; align-items:center; gap:10px; font-size:13px}
+.barrow .name{width:110px; flex:none; color:var(--text-secondary)}
+.barrow .track{flex:1; height:8px; background:var(--surface-2); border-radius:4px; overflow:hidden}
+.barrow .track > i{display:block; height:100%; background:var(--accent); border-radius:4px}
+.barrow .count{width:36px; text-align:right; color:var(--text-muted); font-variant-numeric:tabular-nums}
+
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{text-align:left; color:var(--text-muted); font-weight:500; font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; padding:6px 10px; border-bottom:1px solid var(--line)}
+td{padding:7px 10px; border-bottom:1px solid var(--line); color:var(--text-secondary); font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+.ok{color:var(--up)} .fail{color:var(--down)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px}
+
+.home-link{color:var(--link); text-decoration:none; font-size:13px}
+.home-link:hover{text-decoration:underline}
+footer{max-width:920px; margin:0 auto; padding:0 22px 40px; color:var(--text-muted); font-size:12.5px}
+footer hr{border:none; border-top:1px solid var(--line); margin:0 0 14px}
+.empty{color:var(--text-muted); font-size:13px; padding:8px 0}
+</style>
+</head>
+<body>
+
+<main>
+  <header>
+    <div>
+      <h1><a href="/">vps.arshwaraich.com</a><span class="dot">.</span> wallet-mcp</h1>
+      <p>Apple Wallet pass signing MCP server — usage &amp; health</p>
+    </div>
+    <div class="refresh" id="refresh"></div>
+  </header>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section>
+    <h2>Requests by pass style (all time)</h2>
+    <div class="bars" id="by-style"></div>
+  </section>
+
+  <section>
+    <h2>Recent requests</h2>
+    <table>
+      <thead><tr><th>Time (UTC)</th><th>IP</th><th>Style</th><th>Org</th><th>Result</th><th>ms</th></tr></thead>
+      <tbody id="recent"></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  <hr>
+  <a class="home-link" href="/">&larr; vps.arshwaraich.com</a>
+</footer>
+
+<script>
+function esc(s){ return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function load() {
+  const r = await fetch('api/stats');
+  const d = await r.json();
+
+  document.getElementById('tiles').innerHTML = `
+    <div class="tile"><div class="label">Today</div><div class="value">${d.today}</div><div class="sub">${d.today_ok} succeeded</div></div>
+    <div class="tile"><div class="label">Last 7 days</div><div class="value">${d.week}</div></div>
+    <div class="tile"><div class="label">All time</div><div class="value">${d.total}</div></div>
+    <div class="tile"><div class="label">Unique callers</div><div class="value">${d.unique_ips_total}</div></div>
+  `;
+
+  const maxStyle = Math.max(1, ...d.by_style.map(s => s.c));
+  document.getElementById('by-style').innerHTML = d.by_style.length ? d.by_style.map(s => `
+    <div class="barrow">
+      <div class="name">${esc(s.style)}</div>
+      <div class="track"><i style="width:${(s.c / maxStyle * 100).toFixed(0)}%"></i></div>
+      <div class="count">${s.c}</div>
+    </div>
+  `).join('') : '<div class="empty">No requests yet.</div>';
+
+  document.getElementById('recent').innerHTML = d.recent.length ? d.recent.map(r => `
+    <tr>
+      <td class="mono">${esc(r.ts.replace('T', ' '))}</td>
+      <td class="mono">${esc(r.ip)}</td>
+      <td>${esc(r.style)}</td>
+      <td>${esc(r.organization_name)}</td>
+      <td class="${r.success ? 'ok' : 'fail'}">${r.success ? 'ok' : esc(r.error || 'error')}</td>
+      <td>${r.duration_ms ?? ''}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="6" class="empty">No requests yet.</td></tr>';
+
+  document.getElementById('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>
