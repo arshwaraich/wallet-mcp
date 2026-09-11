@@ -2,6 +2,8 @@
 
 An MCP server that signs [Apple Wallet](https://developer.apple.com/wallet/) (`.pkpass`) passes on request. Point any MCP client (Claude Desktop, Claude.ai custom connector, or anything else speaking Streamable HTTP MCP) at it and ask it to build a boarding pass, event ticket, coupon, store card, or generic pass — it comes back with a signed pass and a temporary download link.
 
+**Hosted instance:** [walletmcppass.com](https://walletmcppass.com) — MCP endpoint at `https://walletmcppass.com/mcp`, free during open beta.
+
 Free to call, rate-limited, with a small usage dashboard. No API key today; a payment layer is meant to slot in later without changing the tool's interface.
 
 ## Why this exists
@@ -84,4 +86,4 @@ No API key — anyone with the URL can call the tool. Protected only by daily ca
 
 ## Status
 
-Currently unhosted — this was run briefly on a personal VPS during development and has since been taken offline pending a dedicated domain/server. See `wallet-mcp.service` for the deployment shape it's meant to run under.
+Live at [walletmcppass.com](https://walletmcppass.com). See `wallet-mcp.service` for the deployment shape it runs under.
