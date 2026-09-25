@@ -192,19 +192,36 @@ def build_pass_json(
             raise PassBuildError(f"unknown transit_type {tt!r}, must be one of {sorted(TRANSIT_TYPES)}")
         style_body["transitType"] = TRANSIT_TYPES[tt]
 
-    def fields(raw: list[dict] | None) -> list[dict]:
-        return [make_field(f.get("key"), f.get("label"), f.get("value"), i) for i, f in enumerate(raw or [])]
+    # Wallet requires field keys to be unique across a style's sections. Auto keys
+    # are prefixed per section, and colliding caller keys get a numeric suffix.
+    # posterGeneric and its fallback style are separate scopes (Apple's own example
+    # repeats keys across them), so each gets its own seen-set.
+    def keyed_fields(seen: set[str]):
+        def fields(raw: list[dict] | None, section: str) -> list[dict]:
+            out = []
+            for i, f in enumerate(raw or []):
+                field = make_field(f.get("key") or f"{section}{i}", f.get("label"), f.get("value"), i)
+                base, n = field["key"], 2
+                while field["key"] in seen:
+                    field["key"] = f"{base}_{n}"
+                    n += 1
+                seen.add(field["key"])
+                out.append(field)
+            return out
+        return fields
+
+    fields = keyed_fields(set())
 
     if primary_fields:
-        style_body["primaryFields"] = fields(primary_fields)
+        style_body["primaryFields"] = fields(primary_fields, "primary")
     if secondary_fields:
-        style_body["secondaryFields"] = fields(secondary_fields)
+        style_body["secondaryFields"] = fields(secondary_fields, "secondary")
     if auxiliary_fields:
-        style_body["auxiliaryFields"] = fields(auxiliary_fields)
+        style_body["auxiliaryFields"] = fields(auxiliary_fields, "auxiliary")
     if header_fields:
-        style_body["headerFields"] = fields(header_fields)
+        style_body["headerFields"] = fields(header_fields, "header")
     if back_fields:
-        style_body["backFields"] = fields(back_fields)
+        style_body["backFields"] = fields(back_fields, "back")
 
     poster_body: dict | None = None
     if poster:
@@ -215,14 +232,15 @@ def build_pass_json(
         # Poster layout: 1 header, up to 4 primary, 2 footer, back fields. Secondary/
         # auxiliary fields have no slot there, so they only appear on the fallback style.
         poster_body = {}
+        poster_fields = keyed_fields(set())
         if header_fields:
-            poster_body["headerFields"] = fields(header_fields)
+            poster_body["headerFields"] = poster_fields(header_fields, "header")
         if primary_fields:
-            poster_body["primaryFields"] = fields(primary_fields)
+            poster_body["primaryFields"] = poster_fields(primary_fields, "primary")
         if footer_fields:
-            poster_body["footerFields"] = fields(footer_fields)
+            poster_body["footerFields"] = poster_fields(footer_fields, "footer")
         if back_fields:
-            poster_body["backFields"] = fields(back_fields)
+            poster_body["backFields"] = poster_fields(back_fields, "back")
     elif footer_fields:
         raise PassBuildError("footer_fields are only shown on poster passes; set poster=True or use auxiliary_fields")
 
