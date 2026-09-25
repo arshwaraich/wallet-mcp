@@ -9,7 +9,8 @@ Group=arsh
 WorkingDirectory=/home/arsh/projects/wallet-mcp
 ExecStart=/home/arsh/projects/wallet-mcp/.venv/bin/python /home/arsh/projects/wallet-mcp/server.py
 Environment=PORT=8400
-Environment=WALLET_MCP_PUBLIC_URL=https://vps.arshwaraich.com/wallet-mcp
+Environment=WALLET_MCP_PUBLIC_URL=https://walletmcppass.com
+Environment=WALLET_MCP_PUBLIC_HOST=walletmcppass.com
 Restart=on-failure
 RestartSec=3
 

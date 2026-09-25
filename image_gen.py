@@ -4,6 +4,8 @@ import io
 
 from PIL import Image, ImageDraw, ImageFont
 
+from pass_builder import parse_color
+
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -19,11 +21,8 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
-    h = hex_color.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    return parse_color(color)
 
 
 def _initials(text: str) -> str:
@@ -82,6 +81,38 @@ def logo_set(color_hex: str, text: str) -> dict[str, bytes]:
         "logo.png": _logo_png(color_hex, text, 160, 50),
         "logo@2x.png": _logo_png(color_hex, text, 320, 100),
         "logo@3x.png": _logo_png(color_hex, text, 480, 150),
+    }
+
+
+def _background_png(color_hex: str, px_w: int, px_h: int) -> bytes:
+    # Vertical gradient from the pass color down to a darker shade of it, so the
+    # poster has some depth without needing caller-supplied artwork.
+    r, g, b = _hex_to_rgb(color_hex)
+    img = Image.new("RGB", (px_w, px_h))
+    draw = ImageDraw.Draw(img)
+    for y in range(px_h):
+        t = 0.55 * y / max(1, px_h - 1)
+        draw.line([(0, y), (px_w, y)], fill=(int(r * (1 - t)), int(g * (1 - t)), int(b * (1 - t))))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def background_set(color_hex: str) -> dict[str, bytes]:
+    """Poster background, 345x505pt (Apple's required size)."""
+    return {
+        "background.png": _background_png(color_hex, 345, 505),
+        "background@2x.png": _background_png(color_hex, 690, 1010),
+        "background@3x.png": _background_png(color_hex, 1035, 1515),
+    }
+
+
+def primary_logo_set(color_hex: str, text: str) -> dict[str, bytes]:
+    """Poster primary logo, max 126x30pt."""
+    return {
+        "primaryLogo.png": _logo_png(color_hex, text, 126, 30),
+        "primaryLogo@2x.png": _logo_png(color_hex, text, 252, 60),
+        "primaryLogo@3x.png": _logo_png(color_hex, text, 378, 90),
     }
 
 
