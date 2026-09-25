@@ -7,6 +7,8 @@ identity is fixed.
 """
 import hashlib
 import io
+import re
+import string
 import subprocess
 import tempfile
 import zipfile
@@ -25,7 +27,35 @@ BARCODE_FORMATS = {
     "PDF417": "PKBarcodeFormatPDF417",
     "Aztec": "PKBarcodeFormatAztec",
     "Code128": "PKBarcodeFormatCode128",
+    # iOS 27+. Older Wallet can't render these, so build_pass_json appends a QR
+    # fallback with the same message (Wallet shows the first format it supports).
+    "Code39": "PKBarcodeFormatCode39",
+    "Codabar": "PKBarcodeFormatCodabar",
+    "EAN13": "PKBarcodeFormatEAN13",
+    "ITF": "PKBarcodeFormatI2of5",  # Apple's key is I2of5, not ITF (see apple/pass-builder)
 }
+IOS27_BARCODE_FORMATS = {"Code39", "Codabar", "EAN13", "ITF"}
+
+_BARCODE_MESSAGE_RULES = {
+    "Code39": (re.compile(r"^[0-9A-Z \-.$/+%]+$"), "digits, uppercase A-Z, space and - . $ / + %"),
+    "Codabar": (re.compile(r"^[A-Da-d]?[0-9\-$:/.+]+[A-Da-d]?$"), "digits and - $ : / . +, optionally wrapped in A-D start/stop characters"),
+    "EAN13": (re.compile(r"^\d{12,13}$"), "12 or 13 digits"),
+    "ITF": (re.compile(r"^(\d\d)+$"), "an even number of digits"),
+}
+
+# iOS 27 Featured Actions -- up to two tappable cards shown under the pass.
+# "place" is deliberately omitted: it needs an Apple Maps place ID rather than
+# a URL, and Apple's own pass-builder doesn't model that key yet.
+FEATURED_ACTION_TYPES = {
+    "viewSchedule", "watchTrailer", "listenToMusic", "call", "addToBalance",
+    "order", "shop", "membershipBenefits", "bookAppointment", "bookCar",
+    "bookFlight", "bookStay", "viewOffersRewards",
+}
+MAX_FEATURED_ACTIONS = 2
+
+# Styles that can carry an iOS 27 posterGeneric layout alongside them as the
+# pre-iOS 27 fallback (Apple's docs list exactly these).
+POSTER_FALLBACK_STYLES = {"generic", "storeCard", "coupon"}
 
 TRANSIT_TYPES = {
     "Air": "PKTransitTypeAir",
@@ -42,13 +72,37 @@ class PassBuildError(ValueError):
     pass
 
 
-def _hex_to_rgb_string(hex_color: str) -> str:
-    h = hex_color.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    if len(h) != 6:
-        raise PassBuildError(f"invalid hex color: {hex_color!r}")
-    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+_RGB_FUNC_RE = re.compile(
+    r"^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*[\d.]+\s*)?\)$"
+)
+
+
+def parse_color(color: str) -> tuple[int, int, int]:
+    """Parse a color into an (r, g, b) tuple.
+
+    Accepts hex (documented input) and also CSS rgb()/rgba() strings, since
+    MCP clients don't always follow the "hex color" instruction literally
+    (see id=14 in wallet-mcp usage log: an rgb() string tripped this up).
+    """
+    color = color.strip()
+    m = _RGB_FUNC_RE.match(color)
+    if m:
+        r, g, b = (int(v) for v in m.groups())
+    else:
+        h = color.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) != 6 or any(c not in string.hexdigits for c in h):
+            raise PassBuildError(f"invalid hex color: {color!r}")
+        r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    if not all(0 <= v <= 255 for v in (r, g, b)):
+        raise PassBuildError(f"invalid color value out of range: {color!r}")
+    return r, g, b
+
+
+def _hex_to_rgb_string(color: str) -> str:
+    """Normalize a color to Apple's pass.json 'rgb(r, g, b)' format."""
+    r, g, b = parse_color(color)
     return f"rgb({r}, {g}, {b})"
 
 
@@ -123,6 +177,10 @@ def build_pass_json(
     auxiliary_fields: list[dict] | None = None,
     header_fields: list[dict] | None = None,
     back_fields: list[dict] | None = None,
+    footer_fields: list[dict] | None = None,
+    poster: bool = False,
+    featured_actions: list[dict] | None = None,
+    barcode_alt_text: str | None = None,
 ) -> dict:
     if style not in STYLE_KEYS:
         raise PassBuildError(f"unknown style {style!r}, must be one of {sorted(STYLE_KEYS)}")
@@ -148,6 +206,26 @@ def build_pass_json(
     if back_fields:
         style_body["backFields"] = fields(back_fields)
 
+    poster_body: dict | None = None
+    if poster:
+        if style not in POSTER_FALLBACK_STYLES:
+            raise PassBuildError(
+                f"poster=True is only supported for styles {sorted(POSTER_FALLBACK_STYLES)}, not {style!r}"
+            )
+        # Poster layout: 1 header, up to 4 primary, 2 footer, back fields. Secondary/
+        # auxiliary fields have no slot there, so they only appear on the fallback style.
+        poster_body = {}
+        if header_fields:
+            poster_body["headerFields"] = fields(header_fields)
+        if primary_fields:
+            poster_body["primaryFields"] = fields(primary_fields)
+        if footer_fields:
+            poster_body["footerFields"] = fields(footer_fields)
+        if back_fields:
+            poster_body["backFields"] = fields(back_fields)
+    elif footer_fields:
+        raise PassBuildError("footer_fields are only shown on poster passes; set poster=True or use auxiliary_fields")
+
     pass_dict: dict = {
         "formatVersion": 1,
         "passTypeIdentifier": PASS_TYPE_IDENTIFIER,
@@ -157,6 +235,10 @@ def build_pass_json(
         "description": description,
         style: style_body,
     }
+    if poster_body is not None:
+        # Wallet on iOS 27+ prefers posterGeneric when present; older versions
+        # ignore the unknown key and render the fallback style above.
+        pass_dict["posterGeneric"] = poster_body
     if logo_text:
         pass_dict["logoText"] = logo_text
     if background_color:
@@ -174,12 +256,40 @@ def build_pass_json(
     if barcode_message:
         if barcode_format not in BARCODE_FORMATS:
             raise PassBuildError(f"unknown barcode_format {barcode_format!r}, must be one of {sorted(BARCODE_FORMATS)}")
-        barcode = {
-            "message": barcode_message,
-            "format": BARCODE_FORMATS[barcode_format],
-            "messageEncoding": "iso-8859-1",
-        }
-        pass_dict["barcodes"] = [barcode]
-        pass_dict["barcode"] = barcode  # legacy single-barcode key, older Wallet versions read this
+        rule = _BARCODE_MESSAGE_RULES.get(barcode_format)
+        if rule and not rule[0].match(barcode_message):
+            raise PassBuildError(f"barcode_message for {barcode_format} must be {rule[1]}, got {barcode_message!r}")
+
+        def make_barcode(fmt: str) -> dict:
+            b = {"message": barcode_message, "format": BARCODE_FORMATS[fmt], "messageEncoding": "iso-8859-1"}
+            if barcode_alt_text:
+                b["altText"] = barcode_alt_text
+            return b
+
+        barcode = make_barcode(barcode_format)
+        if barcode_format in IOS27_BARCODE_FORMATS:
+            fallback = make_barcode("QR")
+            pass_dict["barcodes"] = [barcode, fallback]
+            pass_dict["barcode"] = fallback  # legacy single-barcode key, must be a pre-iOS 27 format
+        else:
+            pass_dict["barcodes"] = [barcode]
+            pass_dict["barcode"] = barcode  # legacy single-barcode key, older Wallet versions read this
+
+    if featured_actions:
+        if len(featured_actions) > MAX_FEATURED_ACTIONS:
+            raise PassBuildError(f"at most {MAX_FEATURED_ACTIONS} featured_actions allowed, got {len(featured_actions)}")
+        actions = []
+        for i, a in enumerate(featured_actions):
+            a_type, url = a.get("type"), a.get("url")
+            if a_type not in FEATURED_ACTION_TYPES:
+                raise PassBuildError(
+                    f"featured_actions[{i}].type {a_type!r} must be one of {sorted(FEATURED_ACTION_TYPES)}"
+                )
+            if not url or not re.match(r"^(https?://\S+|tel:\S+)$", url):
+                raise PassBuildError(f"featured_actions[{i}].url must be an https:// or tel: URL, got {url!r}")
+            if a_type == "call" and not url.startswith("tel:"):
+                raise PassBuildError(f"featured_actions[{i}] of type 'call' needs a tel: URL, got {url!r}")
+            actions.append({"identifier": f"action-{i + 1}", "type": a_type, "url": url})
+        pass_dict["featuredActions"] = actions
 
     return pass_dict

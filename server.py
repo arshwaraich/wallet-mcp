@@ -113,6 +113,11 @@ async def create_wallet_pass(
     logo_color: str | None = None,
     icon_png_b64: str | None = None,
     logo_png_b64: str | None = None,
+    poster: bool = False,
+    footer_fields: list[dict] | None = None,
+    background_png_b64: str | None = None,
+    featured_actions: list[dict] | None = None,
+    barcode_alt_text: str | None = None,
 ) -> dict:
     """Build and sign an Apple Wallet pass, returning a temporary download link.
 
@@ -123,7 +128,11 @@ async def create_wallet_pass(
         logo_text: text shown next to the logo image.
         transit_type: only for style="boardingPass" -- "Air", "Boat", "Bus", "Generic", or "Train" (default "Air").
         barcode_message: raw text/data encoded into the barcode. Omit for no barcode.
-        barcode_format: "QR" (default), "PDF417", "Aztec", or "Code128".
+        barcode_format: "QR" (default), "PDF417", "Aztec", "Code128", or (iOS 27+) "Code39",
+            "Codabar", "EAN13", "ITF". The iOS 27 formats automatically get a QR fallback with the
+            same message for older iPhones. EAN13 needs 12-13 digits, ITF an even number of digits,
+            Code39 uppercase letters/digits.
+        barcode_alt_text: human-readable text shown under the barcode (e.g. the card number).
         background_color / foreground_color / label_color: hex colors, e.g. "#1a1a19".
         relevant_date / expiration_date: ISO 8601 timestamps.
         voided: mark the pass voided/used (shows a "VOID" stamp).
@@ -134,6 +143,19 @@ async def create_wallet_pass(
             when icon_png_b64 is not supplied.
         logo_color: color for the auto-generated logo text (defaults to icon_color).
         icon_png_b64 / logo_png_b64: base64-encoded PNG to use instead of auto-generated art.
+        poster: (iOS 27+) render as Apple's new full-bleed "Poster Generic" layout -- large background
+            image, header field, up to 4 primary fields, up to 2 footer_fields, and a square QR code.
+            Only for style "generic", "storeCard" or "coupon"; that style is kept as the fallback
+            older iPhones display (secondary/auxiliary fields only show on the fallback). Good for
+            memberships, loyalty cards and gift cards.
+        footer_fields: up to 2 fields along the bottom of a poster pass (requires poster=True).
+        background_png_b64: base64 PNG poster background, ideally 1035x1515 px (345x505pt @3x);
+            a gradient in background_color is generated if omitted. Only used when poster=True.
+        featured_actions: (iOS 27+) up to 2 tappable shortcut cards shown under the pass, each
+            {"type": ..., "url": "https://..."}. type is one of: viewSchedule, watchTrailer,
+            listenToMusic, call (url must be "tel:+..."), addToBalance, order, shop,
+            membershipBenefits, bookAppointment, bookCar, bookFlight, bookStay, viewOffersRewards.
+            Works on every style; ignored by older iPhones.
 
     Returns a dict with download_url (valid for 1 hour), serial_number, and pass_type_identifier.
     """
@@ -171,6 +193,10 @@ async def create_wallet_pass(
             auxiliary_fields=auxiliary_fields,
             header_fields=header_fields,
             back_fields=back_fields,
+            footer_fields=footer_fields,
+            poster=poster,
+            featured_actions=featured_actions,
+            barcode_alt_text=barcode_alt_text,
         )
 
         files: dict[str, bytes] = {}
@@ -182,6 +208,12 @@ async def create_wallet_pass(
             files["logo.png"] = image_gen.decode_b64_png(logo_png_b64)
         else:
             files.update(image_gen.logo_set(logo_color or icon_color, logo_text or organization_name))
+        if poster:
+            if background_png_b64:
+                files["background.png"] = image_gen.decode_b64_png(background_png_b64)
+            else:
+                files.update(image_gen.background_set(background_color or icon_color))
+            files.update(image_gen.primary_logo_set(foreground_color or "#ffffff", logo_text or organization_name))
 
         pkpass_bytes = pass_builder.build_pkpass(pass_dict, files)
         token = _register_download(pkpass_bytes)
