@@ -27,14 +27,13 @@ BARCODE_FORMATS = {
     "PDF417": "PKBarcodeFormatPDF417",
     "Aztec": "PKBarcodeFormatAztec",
     "Code128": "PKBarcodeFormatCode128",
-    # iOS 27+. Older Wallet can't render these, so build_pass_json appends a QR
-    # fallback with the same message (Wallet shows the first format it supports).
+    # iOS 27+ only. Older Wallet skips these and shows the next listed format it
+    # supports, if any -- the caller decides whether to list one.
     "Code39": "PKBarcodeFormatCode39",
     "Codabar": "PKBarcodeFormatCodabar",
     "EAN13": "PKBarcodeFormatEAN13",
     "ITF": "PKBarcodeFormatI2of5",  # Apple's key is I2of5, not ITF (see apple/pass-builder)
 }
-IOS27_BARCODE_FORMATS = {"Code39", "Codabar", "EAN13", "ITF"}
 
 _BARCODE_MESSAGE_RULES = {
     "Code39": (re.compile(r"^[0-9A-Z \-.$/+%]+$"), "digits, uppercase A-Z, space and - . $ / + %"),
@@ -165,7 +164,7 @@ def build_pass_json(
     logo_text: str | None = None,
     transit_type: str | None = None,
     barcode_message: str | None = None,
-    barcode_format: str = "QR",
+    barcode_format: str | list[str] = "QR",
     background_color: str | None = None,
     foreground_color: str | None = None,
     label_color: str | None = None,
@@ -272,26 +271,23 @@ def build_pass_json(
     if voided:
         pass_dict["voided"] = True
     if barcode_message:
-        if barcode_format not in BARCODE_FORMATS:
-            raise PassBuildError(f"unknown barcode_format {barcode_format!r}, must be one of {sorted(BARCODE_FORMATS)}")
-        rule = _BARCODE_MESSAGE_RULES.get(barcode_format)
-        if rule and not rule[0].match(barcode_message):
-            raise PassBuildError(f"barcode_message for {barcode_format} must be {rule[1]}, got {barcode_message!r}")
-
-        def make_barcode(fmt: str) -> dict:
+        # Emitted exactly as given, in order; Wallet shows the first format it supports.
+        formats = [barcode_format] if isinstance(barcode_format, str) else list(barcode_format)
+        if not formats:
+            raise PassBuildError("barcode_format must name at least one format")
+        barcodes = []
+        for fmt in formats:
+            if fmt not in BARCODE_FORMATS:
+                raise PassBuildError(f"unknown barcode_format {fmt!r}, must be one of {sorted(BARCODE_FORMATS)}")
+            rule = _BARCODE_MESSAGE_RULES.get(fmt)
+            if rule and not rule[0].match(barcode_message):
+                raise PassBuildError(f"barcode_message for {fmt} must be {rule[1]}, got {barcode_message!r}")
             b = {"message": barcode_message, "format": BARCODE_FORMATS[fmt], "messageEncoding": "iso-8859-1"}
             if barcode_alt_text:
                 b["altText"] = barcode_alt_text
-            return b
-
-        barcode = make_barcode(barcode_format)
-        if barcode_format in IOS27_BARCODE_FORMATS:
-            fallback = make_barcode("QR")
-            pass_dict["barcodes"] = [barcode, fallback]
-            pass_dict["barcode"] = fallback  # legacy single-barcode key, must be a pre-iOS 27 format
-        else:
-            pass_dict["barcodes"] = [barcode]
-            pass_dict["barcode"] = barcode  # legacy single-barcode key, older Wallet versions read this
+            barcodes.append(b)
+        # Only the iOS 9+ "barcodes" array; the deprecated single "barcode" key is left out.
+        pass_dict["barcodes"] = barcodes
 
     if featured_actions:
         if len(featured_actions) > MAX_FEATURED_ACTIONS:

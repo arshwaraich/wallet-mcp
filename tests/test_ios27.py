@@ -28,18 +28,23 @@ def unzip(pkpass):
     return {n: z.read(n) for n in z.namelist()}
 
 
-# --- new barcode formats + QR fallback
+# --- new barcode formats, emitted exactly as requested
 for fmt, msg, key in [("EAN13", "4006381333931", "EAN13"), ("ITF", "12345678", "I2of5"),
                       ("Code39", "ABC-123", "Code39"), ("Codabar", "A12345B", "Codabar")]:
     d = pb.build_pass_json(style="storeCard", barcode_message=msg, barcode_format=fmt, **BASE)
     check(f"{fmt}: primary format is PKBarcodeFormat{key}", d["barcodes"][0]["format"] == f"PKBarcodeFormat{key}")
-    check(f"{fmt}: QR fallback second", d["barcodes"][1]["format"] == "PKBarcodeFormatQR" and d["barcodes"][1]["message"] == msg)
-    check(f"{fmt}: legacy barcode key is QR", d["barcode"]["format"] == "PKBarcodeFormatQR")
+    check(f"{fmt}: no fallback added", len(d["barcodes"]) == 1 and "barcode" not in d)
 raises("EAN13 rejects letters", lambda: pb.build_pass_json(style="generic", barcode_message="ABC", barcode_format="EAN13", **BASE), "12 or 13 digits")
 raises("ITF rejects odd length", lambda: pb.build_pass_json(style="generic", barcode_message="123", barcode_format="ITF", **BASE), "even number")
 raises("Code39 rejects lowercase", lambda: pb.build_pass_json(style="generic", barcode_message="abc", barcode_format="Code39", **BASE), "uppercase")
 d = pb.build_pass_json(style="generic", barcode_message="x", barcode_alt_text="No. 42", **BASE)
 check("QR: single barcode, no fallback", len(d["barcodes"]) == 1 and d["barcodes"][0]["altText"] == "No. 42")
+d = pb.build_pass_json(style="storeCard", barcode_message="9022334130407", barcode_format=["EAN13", "Code128"], barcode_alt_text="9022334130407", **BASE)
+check("list: formats kept in caller's order", [b["format"] for b in d["barcodes"]] == ["PKBarcodeFormatEAN13", "PKBarcodeFormatCode128"])
+check("list: every entry gets message + altText", all(b["message"] == "9022334130407" and b["altText"] == "9022334130407" for b in d["barcodes"]))
+raises("list: each format validated", lambda: pb.build_pass_json(style="generic", barcode_message="ABC", barcode_format=["Code128", "EAN13"], **BASE), "12 or 13 digits")
+raises("list: unknown format rejected", lambda: pb.build_pass_json(style="generic", barcode_message="1", barcode_format=["QR", "UPC"], **BASE), "unknown barcode_format")
+raises("list: empty rejected", lambda: pb.build_pass_json(style="generic", barcode_message="1", barcode_format=[], **BASE), "at least one")
 
 # --- featured actions
 acts = [{"type": "membershipBenefits", "url": "https://example.com/b"}, {"type": "call", "url": "tel:+15555550100"}]
@@ -79,11 +84,12 @@ old = {}
 
 
 def strip_keys(d):
-    # field keys changed on purpose (they used to collide across sections)
+    # field keys changed on purpose (they used to collide across sections), and the
+    # deprecated single "barcode" key is no longer emitted
     return {
         k: ({sk: [{fk: fv for fk, fv in f.items() if fk != "key"} for f in sv] if isinstance(sv, list) else sv
              for sk, sv in v.items()} if isinstance(v, dict) and k in pb.STYLE_KEYS else v)
-        for k, v in d.items()}
+        for k, v in d.items() if k != "barcode"}
 
 
 exec(compile(old_src, "old_pass_builder", "exec"), old)
