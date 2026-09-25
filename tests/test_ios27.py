@@ -76,11 +76,32 @@ raises("bad color", lambda: pb._hex_to_rgb_string("green"), "invalid")
 old_src = subprocess.run(["git", "show", "HEAD:pass_builder.py"], capture_output=True, text=True,
                          cwd=Path(__file__).resolve().parent.parent).stdout
 old = {}
+
+
+def strip_keys(d):
+    # field keys changed on purpose (they used to collide across sections)
+    return {
+        k: ({sk: [{fk: fv for fk, fv in f.items() if fk != "key"} for f in sv] if isinstance(sv, list) else sv
+             for sk, sv in v.items()} if isinstance(v, dict) and k in pb.STYLE_KEYS else v)
+        for k, v in d.items()}
+
+
 exec(compile(old_src, "old_pass_builder", "exec"), old)
 for style in sorted(pb.STYLE_KEYS):
     kw = dict(style=style, barcode_message="HELLO", barcode_format="PDF417", background_color="#123456",
               primary_fields=[{"label": "a", "value": "b"}], back_fields=[{"value": "c"}], **BASE)
-    check(f"regression: {style} unchanged", pb.build_pass_json(**kw) == old["build_pass_json"](**kw))
+    new_d, old_d = pb.build_pass_json(**kw), old["build_pass_json"](**kw)
+    check(f"regression: {style} unchanged apart from field keys", strip_keys(new_d) == strip_keys(old_d))
+    keys = [f["key"] for v in new_d[style].values() if isinstance(v, list) for f in v]
+    check(f"{style}: field keys unique", len(keys) == len(set(keys)), str(keys))
+
+# --- key uniqueness incl. caller-supplied collisions and poster scope
+d = pb.build_pass_json(style="storeCard", poster=True, header_fields=[{"value": "1"}], primary_fields=[{"key": "n", "value": "a"}],
+                       secondary_fields=[{"key": "n", "value": "b"}], auxiliary_fields=[{"value": "c"}],
+                       footer_fields=[{"value": "f"}], back_fields=[{"value": "b"}], **BASE)
+for st in ("storeCard", "posterGeneric"):
+    keys = [f["key"] for v in d[st].values() for f in v]
+    check(f"unique keys within {st}", len(keys) == len(set(keys)), str(keys))
 
 # --- full signed package
 d = pb.build_pass_json(style="generic", poster=True, barcode_message="4006381333931", barcode_format="EAN13",
