@@ -95,7 +95,7 @@ async def create_wallet_pass(
     logo_text: str | None = None,
     transit_type: str | None = None,
     barcode_message: str | None = None,
-    barcode_format: str = "QR",
+    barcode_format: str | list[str] = "QR",
     background_color: str | None = None,
     foreground_color: str | None = None,
     label_color: str | None = None,
@@ -113,6 +113,7 @@ async def create_wallet_pass(
     logo_color: str | None = None,
     icon_png_b64: str | None = None,
     logo_png_b64: str | None = None,
+    generate_logo: bool = True,
     poster: bool = False,
     footer_fields: list[dict] | None = None,
     background_png_b64: str | None = None,
@@ -128,10 +129,12 @@ async def create_wallet_pass(
         logo_text: text shown next to the logo image.
         transit_type: only for style="boardingPass" -- "Air", "Boat", "Bus", "Generic", or "Train" (default "Air").
         barcode_message: raw text/data encoded into the barcode. Omit for no barcode.
-        barcode_format: "QR" (default), "PDF417", "Aztec", "Code128", or (iOS 27+) "Code39",
-            "Codabar", "EAN13", "ITF". The iOS 27 formats automatically get a QR fallback with the
-            same message for older iPhones. EAN13 needs 12-13 digits, ITF an even number of digits,
-            Code39 uppercase letters/digits.
+        barcode_format: a format name or an ordered list of them; each becomes a barcode with the
+            same message, and Wallet shows the first one the device supports. Nothing is added that
+            you don't list. Formats: "QR" (default), "PDF417", "Aztec", "Code128" (all iOS versions),
+            and iOS 27+ only: "Code39", "Codabar", "EAN13", "ITF" -- older iPhones skip these, so
+            e.g. ["EAN13", "Code128"] shows EAN13 on iOS 27 and Code128 before it. EAN13 needs
+            12-13 digits, ITF an even number of digits, Code39 uppercase letters/digits.
         barcode_alt_text: human-readable text shown under the barcode (e.g. the card number).
         background_color / foreground_color / label_color: hex colors, e.g. "#1a1a19".
         relevant_date / expiration_date: ISO 8601 timestamps.
@@ -141,8 +144,13 @@ async def create_wallet_pass(
         serial_number: unique id for this pass; auto-generated if omitted.
         icon_color / icon_text: control the auto-generated icon (a colored square with initials)
             when icon_png_b64 is not supplied.
-        logo_color: color for the auto-generated logo text (defaults to icon_color).
+        logo_color: color of the auto-generated logo image, a wordmark of logo_text (or
+            organization_name) drawn on a transparent background over background_color. Defaults
+            to icon_color. Wallet also renders logo_text as text beside the logo image, so the
+            generated wordmark repeats it -- set generate_logo=False to show only the text.
         icon_png_b64 / logo_png_b64: base64-encoded PNG to use instead of auto-generated art.
+        generate_logo: set False to include no logo image at all (logo is optional in Wallet;
+            ignored if logo_png_b64 is given).
         poster: (iOS 27+) render as Apple's new full-bleed "Poster Generic" layout -- large background
             image, header field, up to 4 primary fields, up to 2 footer_fields, and a square QR code.
             Only for style "generic", "storeCard" or "coupon"; that style is kept as the fallback
@@ -206,7 +214,7 @@ async def create_wallet_pass(
             files.update(image_gen.icon_set(icon_color, icon_text or organization_name))
         if logo_png_b64:
             files["logo.png"] = image_gen.decode_b64_png(logo_png_b64)
-        else:
+        elif generate_logo:
             files.update(image_gen.logo_set(logo_color or icon_color, logo_text or organization_name))
         if poster:
             if background_png_b64:

@@ -33,8 +33,9 @@ wallet-mcp.service   Example systemd unit (Restart=on-failure, boots enabled)
 style: "boardingPass" | "eventTicket" | "coupon" | "generic" | "storeCard"
 organization_name, description        # required
 logo_text, transit_type               # transit_type only applies to boardingPass ("Air" default)
-barcode_message, barcode_format       # "QR" (default) | "PDF417" | "Aztec" | "Code128"; omit message for no barcode
-                                       # iOS 27+: "Code39" | "Codabar" | "EAN13" | "ITF" (auto QR fallback for older iOS)
+barcode_message, barcode_format       # format name or ordered list, e.g. ["EAN13", "Code128"]; omit message for no barcode
+                                       # "QR" (default) | "PDF417" | "Aztec" | "Code128"; iOS 27+: "Code39" | "Codabar" | "EAN13" | "ITF"
+                                       # Wallet shows the first listed format the device supports; no fallback is added
 barcode_alt_text                      # human-readable text under the barcode
 background_color, foreground_color, label_color   # hex "#1a1a19" or "rgb(26, 26, 25)"
 relevant_date, expiration_date        # ISO 8601
@@ -44,6 +45,7 @@ primary_fields, secondary_fields, auxiliary_fields, header_fields, back_fields
 serial_number                         # auto-generated UUID if omitted
 icon_color, icon_text, logo_color     # control the auto-generated art
 icon_png_b64, logo_png_b64            # supply your own PNG instead of auto-generated art
+generate_logo                          # False = no logo image (e.g. when logo_text alone is enough)
 
 # iOS 27+
 poster                                 # Poster Generic layout; style must be generic/storeCard/coupon (kept as fallback)
