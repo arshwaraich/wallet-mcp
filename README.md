@@ -34,7 +34,9 @@ style: "boardingPass" | "eventTicket" | "coupon" | "generic" | "storeCard"
 organization_name, description        # required
 logo_text, transit_type               # transit_type only applies to boardingPass ("Air" default)
 barcode_message, barcode_format       # "QR" (default) | "PDF417" | "Aztec" | "Code128"; omit message for no barcode
-background_color, foreground_color, label_color   # hex, e.g. "#1a1a19"
+                                       # iOS 27+: "Code39" | "Codabar" | "EAN13" | "ITF" (auto QR fallback for older iOS)
+barcode_alt_text                      # human-readable text under the barcode
+background_color, foreground_color, label_color   # hex "#1a1a19" or "rgb(26, 26, 25)"
 relevant_date, expiration_date        # ISO 8601
 voided                                 # stamps the pass VOID
 primary_fields, secondary_fields, auxiliary_fields, header_fields, back_fields
@@ -42,6 +44,12 @@ primary_fields, secondary_fields, auxiliary_fields, header_fields, back_fields
 serial_number                         # auto-generated UUID if omitted
 icon_color, icon_text, logo_color     # control the auto-generated art
 icon_png_b64, logo_png_b64            # supply your own PNG instead of auto-generated art
+
+# iOS 27+
+poster                                 # Poster Generic layout; style must be generic/storeCard/coupon (kept as fallback)
+footer_fields                          # up to 2, poster only
+background_png_b64                     # poster background (1035x1515 px); gradient auto-generated if omitted
+featured_actions                       # up to 2 of {type, url}, e.g. {"type": "membershipBenefits", "url": "https://..."}
 ```
 
 Returns `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }`. The download link is valid for one hour.
@@ -82,6 +90,8 @@ No API key — anyone with the URL can call the tool. Protected only by daily ca
 
 - `barcodes` is a top-level key in `pass.json`, a sibling of `boardingPass`/`eventTicket`/etc — not nested inside the style dict. Nesting it there is silently ignored: the pass installs fine, but there's no barcode anywhere on the card.
 - Serve `.pkpass` files with `Content-Type: application/vnd.apple.pkpass` explicitly. Both Python's `mimetypes` module and most static file servers don't know this extension and fall back to `application/octet-stream`, which makes Wallet (and Mail/browsers) treat it as a generic download instead of offering "Add to Apple Wallet."
+- Field keys must be unique across a pass's sections. Auto-generated keys used to restart at `field0` in every section; iOS rejects many such passes outright (the pass just won't open), though some combinations slip through, which hides the bug. Keys are now section-prefixed (`primary0`, `secondary0`, ...) with collisions suffixed.
+- The Interleaved 2 of 5 barcode format string is `PKBarcodeFormatI2of5`, not `PKBarcodeFormatITF` as several WWDC26 write-ups claim. [apple/pass-builder](https://github.com/apple/pass-builder) is the authoritative reference for the iOS 27 keys.
 - Some barcodes (e.g. many airline boarding passes) are Aztec codes, not QR — visually similar but with one bullseye finder pattern instead of three corner squares. Match `barcode_format` to what you're actually encoding.
 
 ## Status
