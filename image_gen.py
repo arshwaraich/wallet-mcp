@@ -107,6 +107,15 @@ def background_set(color_hex: str) -> dict[str, bytes]:
     }
 
 
+def artwork_set(color_hex: str) -> dict[str, bytes]:
+    """Poster event ticket artwork, 358x448pt (Apple's required size)."""
+    return {
+        "artwork.png": _background_png(color_hex, 358, 448),
+        "artwork@2x.png": _background_png(color_hex, 716, 896),
+        "artwork@3x.png": _background_png(color_hex, 1074, 1344),
+    }
+
+
 def primary_logo_set(color_hex: str, text: str) -> dict[str, bytes]:
     """Poster primary logo, max 126x30pt."""
     return {

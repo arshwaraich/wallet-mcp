@@ -52,6 +52,15 @@ poster                                 # Poster Generic layout; style must be ge
 footer_fields                          # up to 2, poster only
 background_png_b64                     # poster background (1035x1515 px); gradient auto-generated if omitted
 featured_actions                       # up to 2 of {type, url}, e.g. {"type": "membershipBenefits", "url": "https://..."}
+
+# Semantic tags and layouts
+semantics                              # Apple SemanticTags dict, emitted as given; unknown keys and bad types rejected
+semantic_layout                        # boardingPass (airline, iOS 26+) -> semanticBoardingPass; eventTicket -> posterEventTicket
+                                       # required tags are checked; the classic style stays as the fallback, so keep its fields
+info_links                             # top-level event-guide / airline-page links: bagPolicyURL, changeSeatURL, ...
+
+# Extra images (base64 PNG); which one shows depends on style and iOS version, see the tool docstring
+primary_logo_png_b64, secondary_logo_png_b64, strip_png_b64, thumbnail_png_b64, artwork_png_b64
 ```
 
 Returns `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }`. The download link is valid for one hour.
@@ -94,6 +103,8 @@ No API key — anyone with the URL can call the tool. Protected only by daily ca
 - Serve `.pkpass` files with `Content-Type: application/vnd.apple.pkpass` explicitly. Both Python's `mimetypes` module and most static file servers don't know this extension and fall back to `application/octet-stream`, which makes Wallet (and Mail/browsers) treat it as a generic download instead of offering "Add to Apple Wallet."
 - Field keys must be unique across a pass's sections. Auto-generated keys used to restart at `field0` in every section; iOS rejects many such passes outright (the pass just won't open), though some combinations slip through, which hides the bug. Keys are now section-prefixed (`primary0`, `secondary0`, ...) with collisions suffixed.
 - The Interleaved 2 of 5 barcode format string is `PKBarcodeFormatI2of5`, not `PKBarcodeFormatITF` as several WWDC26 write-ups claim. [apple/pass-builder](https://github.com/apple/pass-builder) is the authoritative reference for the iOS 27 keys.
+- Apple's docs and Apple's own pass-builder code disagree on the semantic boarding pass time-zone keys: `departureLocationTimeZone` (docs) vs `departureAirportTimeZone` (code), same for destination. Both are accepted and emitted as given; send both.
+- Apple's Pass Builder validator flags a poster event ticket without NFC as an error, and the docs say the design isn't meant for barcode entry. NFC needs an Apple entitlement this deployment doesn't have, so those passes may show as classic event tickets.
 - Some barcodes (e.g. many airline boarding passes) are Aztec codes, not QR — visually similar but with one bullseye finder pattern instead of three corner squares. Match `barcode_format` to what you're actually encoding.
 
 ## Status

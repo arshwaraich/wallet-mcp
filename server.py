@@ -119,6 +119,14 @@ async def create_wallet_pass(
     background_png_b64: str | None = None,
     featured_actions: list[dict] | None = None,
     barcode_alt_text: str | None = None,
+    semantics: dict | None = None,
+    semantic_layout: bool = False,
+    info_links: dict | None = None,
+    primary_logo_png_b64: str | None = None,
+    secondary_logo_png_b64: str | None = None,
+    strip_png_b64: str | None = None,
+    thumbnail_png_b64: str | None = None,
+    artwork_png_b64: str | None = None,
 ) -> dict:
     """Build and sign an Apple Wallet pass, returning a temporary download link.
 
@@ -149,8 +157,8 @@ async def create_wallet_pass(
             to icon_color. Wallet also renders logo_text as text beside the logo image, so the
             generated wordmark repeats it -- set generate_logo=False to show only the text.
         icon_png_b64 / logo_png_b64: base64-encoded PNG to use instead of auto-generated art.
-        generate_logo: set False to include no logo image at all (logo is optional in Wallet;
-            ignored if logo_png_b64 is given).
+        generate_logo: set False to include no auto-generated logo or primary logo at all (both are
+            optional in Wallet; a supplied logo_png_b64/primary_logo_png_b64 is still used).
         poster: (iOS 27+) render as Apple's new full-bleed "Poster Generic" layout -- large background
             image, header field, up to 4 primary fields, up to 2 footer_fields, and a square QR code.
             Only for style "generic", "storeCard" or "coupon"; that style is kept as the fallback
@@ -164,6 +172,51 @@ async def create_wallet_pass(
             listenToMusic, call (url must be "tel:+..."), addToBalance, order, shop,
             membershipBenefits, bookAppointment, bookCar, bookFlight, bookStay, viewOffersRewards.
             Works on every style; ignored by older iPhones.
+        semantics: machine-readable tags (Apple's SemanticTags) that Wallet uses for Siri/Maps/
+            Calendar suggestions on every style, and to lay out the semantic designs below. Values
+            are emitted as given; unknown keys and wrong types are rejected. Dates are ISO 8601
+            with an offset. Common shapes: passengerName {"givenName", "familyName"}; flightNumber
+            is a number (123, not "AI123"); seats [{"seatNumber", "seatRow", "seatSection", ...}];
+            venueLocation {"latitude", "longitude"}; totalPrice {"amount": "12.50",
+            "currencyCode": "INR"}; eventType one of generic, livePerformance, movie, sports,
+            conference, convention, workshop, socialGathering.
+        semantic_layout: use Wallet's semantic design, with the classic style kept for older
+            iPhones -- which only show primary/secondary/auxiliary fields, so still fill those.
+            - boardingPass (iOS 26+, airline only, transit_type "Air"): live flight status, gate
+              changes, badges. Requires semantics airlineCode, flightNumber, departureAirportCode,
+              departureCityName, destinationAirportCode, destinationCityName, originalBoardingDate,
+              originalDepartureDate, originalArrivalDate, passengerName, plus departure and
+              destination time zones (IANA, e.g. "Asia/Kolkata"). Apple's docs call these
+              departureLocationTimeZone/destinationLocationTimeZone but Apple's pass-builder code
+              uses departureAirportTimeZone/destinationAirportTimeZone; either is accepted, and
+              giving both is safest.
+            - eventTicket (iOS 26+ "poster event ticket"): requires eventName, venueName,
+              venueRegionName, venueRoom; sports also needs awayTeamAbbreviation and
+              homeTeamAbbreviation, livePerformance needs performerNames. Apple says this design
+              is meant for NFC entry, not barcodes, and NFC passes need an Apple entitlement this
+              server doesn't have -- Wallet may show the classic event ticket instead.
+        info_links: top-level links that fill the event guide (event tickets) or the airline and
+            services page (boarding passes). URL keys (http/https): accessibilityURL, addOnURL,
+            bagPolicyURL, merchandiseURL, orderFoodURL, parkingInformationURL, purchaseParkingURL,
+            sellURL, transferURL, transitInformationURL, contactVenueWebsite,
+            directionsInformationURL, changeSeatURL, entertainmentURL,
+            purchaseAdditionalBaggageURL, purchaseLoungeAccessURL, purchaseWifiURL, upgradeURL,
+            managementURL, registerServiceAnimalURL, reportLostBagURL, requestWheelchairURL,
+            transitProviderWebsiteURL. Text keys: contactVenueEmail, contactVenuePhoneNumber,
+            transitProviderEmail, transitProviderPhoneNumber.
+        Extra images, each a base64 PNG. Which image shows where depends on style and iOS version
+        (from Apple's Pass Designer docs); Wallet ignores an image a layout has no slot for:
+            primary_logo_png_b64: max 126x30pt. Boarding pass and coupon on iOS 27+, event ticket
+                on iOS 18+, poster. On those, the plain logo is only shown by older iOS. A wordmark
+                is auto-generated for poster and semantic_layout passes unless generate_logo=False.
+            secondary_logo_png_b64: max 135x12pt. Event tickets, iOS 18+.
+            strip_png_b64: 375x144pt banner behind the primary fields. Coupon, store card and
+                event ticket; not shown on iOS 26+ coupon/store card.
+            thumbnail_png_b64: 90x90pt. Generic and event ticket.
+            artwork_png_b64: 358x448pt poster event ticket artwork (eventTicket with
+                semantic_layout, iOS 27+); if neither this nor background_png_b64 is given, a
+                gradient in background_color is generated, since Wallet needs one of them.
+            background_png_b64 is also used on eventTicket (blurred behind the classic ticket).
 
     Returns a dict with download_url (valid for 1 hour), serial_number, and pass_type_identifier.
     """
@@ -205,6 +258,9 @@ async def create_wallet_pass(
             poster=poster,
             featured_actions=featured_actions,
             barcode_alt_text=barcode_alt_text,
+            semantics=semantics,
+            semantic_layout=semantic_layout,
+            info_links=info_links,
         )
 
         files: dict[str, bytes] = {}
@@ -221,7 +277,21 @@ async def create_wallet_pass(
                 files["background.png"] = image_gen.decode_b64_png(background_png_b64)
             else:
                 files.update(image_gen.background_set(background_color or icon_color))
+        elif background_png_b64 and style == "eventTicket":
+            files["background.png"] = image_gen.decode_b64_png(background_png_b64)
+        if semantic_layout and style == "eventTicket":
+            if artwork_png_b64:
+                files["artwork.png"] = image_gen.decode_b64_png(artwork_png_b64)
+            elif not background_png_b64:  # Wallet needs one of the two
+                files.update(image_gen.artwork_set(background_color or icon_color))
+        if primary_logo_png_b64:
+            files["primaryLogo.png"] = image_gen.decode_b64_png(primary_logo_png_b64)
+        elif (poster or semantic_layout) and generate_logo:
             files.update(image_gen.primary_logo_set(foreground_color or "#ffffff", logo_text or organization_name))
+        for name, b64 in (("secondaryLogo", secondary_logo_png_b64), ("strip", strip_png_b64),
+                          ("thumbnail", thumbnail_png_b64)):
+            if b64:
+                files[f"{name}.png"] = image_gen.decode_b64_png(b64)
 
         pkpass_bytes = pass_builder.build_pkpass(pass_dict, files)
         token = _register_download(pkpass_bytes)
