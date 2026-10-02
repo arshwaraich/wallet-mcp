@@ -14,6 +14,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import semantics as sem
+
 SIGNING_DIR = Path.home() / "projects/apple-wallet/wallet_signing"
 PASSKEY = SIGNING_DIR / "passkey.pem"
 CERT = SIGNING_DIR / "pass.pem"
@@ -180,6 +182,9 @@ def build_pass_json(
     poster: bool = False,
     featured_actions: list[dict] | None = None,
     barcode_alt_text: str | None = None,
+    semantics: dict | None = None,
+    semantic_layout: bool = False,
+    info_links: dict | None = None,
 ) -> dict:
     if style not in STYLE_KEYS:
         raise PassBuildError(f"unknown style {style!r}, must be one of {sorted(STYLE_KEYS)}")
@@ -305,5 +310,23 @@ def build_pass_json(
                 raise PassBuildError(f"featured_actions[{i}] of type 'call' needs a tel: URL, got {url!r}")
             actions.append({"identifier": f"action-{i + 1}", "type": a_type, "url": url})
         pass_dict["featuredActions"] = actions
+
+    try:
+        if semantics:
+            pass_dict["semantics"] = sem.normalize(semantics, _hex_to_rgb_string)
+        if semantic_layout:
+            if style not in sem.SEMANTIC_STYLE_SCHEMES:
+                raise PassBuildError(
+                    f"semantic_layout is only for styles {sorted(sem.SEMANTIC_STYLE_SCHEMES)}, not {style!r}"
+                )
+            if style == "boardingPass" and style_body["transitType"] != TRANSIT_TYPES["Air"]:
+                raise PassBuildError("semantic_layout on boardingPass is for airline passes only (transit_type 'Air')")
+            sem.check_required(style, pass_dict.get("semantics", {}))
+            # Wallet picks the first scheme it supports; the classic style stays as the fallback.
+            pass_dict["preferredStyleSchemes"] = sem.SEMANTIC_STYLE_SCHEMES[style]
+        if info_links:
+            pass_dict.update(sem.normalize_info_links(info_links))
+    except sem.SemanticsError as e:
+        raise PassBuildError(str(e)) from None
 
     return pass_dict
