@@ -4,7 +4,7 @@ import io
 
 from PIL import Image, ImageDraw, ImageFont
 
-from pass_builder import parse_color
+from pass_builder import PassBuildError, parse_color
 
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -125,5 +125,30 @@ def primary_logo_set(color_hex: str, text: str) -> dict[str, bytes]:
     }
 
 
-def decode_b64_png(b64_data: str) -> bytes:
-    return base64.b64decode(b64_data)
+def decode_b64_png(b64_data: str, field: str) -> bytes:
+    """Decode a caller-supplied base64 PNG, rejecting anything Wallet couldn't use.
+
+    A data: URI prefix and embedded whitespace are tolerated; missing padding is not
+    re-added, since it almost always means the string was truncated and would decode
+    to a corrupt image.
+    """
+    data = b64_data.strip()
+    if data.startswith("data:"):
+        data = data.partition(",")[2]
+    data = "".join(data.split())
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except ValueError as e:
+        raise PassBuildError(
+            f"{field} is not valid base64 ({e}; {len(data)} chars). "
+            "If it was cut off, resend the complete string."
+        ) from None
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            fmt = img.format
+            img.verify()
+    except Exception:
+        raise PassBuildError(f"{field} does not decode to a readable PNG image") from None
+    if fmt != "PNG":
+        raise PassBuildError(f"{field} is a {fmt} image; Wallet needs PNG")
+    return raw

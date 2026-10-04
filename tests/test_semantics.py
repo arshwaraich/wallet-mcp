@@ -121,5 +121,27 @@ check("poster still gets primary logo", "primaryLogo@3x.png" in names)
 names, pj = files_for(style="boardingPass", semantics=FLIGHT, semantic_layout=True)
 check("boarding layout through the tool", pj["preferredStyleSchemes"][0] == "semanticBoardingPass" and "primaryLogo.png" in names)
 
+# Caller-supplied images: a malformed one must come back as a ToolError naming the field, not an opaque internal error
+from mcp.server.mcpserver.exceptions import ToolError
+import base64 as _b64, image_gen as _ig
+
+
+def tool_raises(name, needle, **kw):
+    try:
+        files_for(**kw)
+        check(name, False, "no error raised")
+    except ToolError as e:
+        check(name, needle in str(e), str(e))
+
+
+tool_raises("truncated artwork b64 -> ToolError naming field", "artwork_png_b64 is not valid base64",
+            style="eventTicket", semantics=EVENT, semantic_layout=True, artwork_png_b64=PNG[:-3])
+tool_raises("non-image strip -> ToolError", "strip_png_b64 does not decode to a readable PNG",
+            style="coupon", strip_png_b64=_b64.b64encode(b"not an image").decode())
+_jpg = io.BytesIO(); __import__("PIL.Image").Image.new("RGB", (4, 4)).save(_jpg, "JPEG")
+tool_raises("JPEG icon -> ToolError", "Wallet needs PNG", style="generic", icon_png_b64=_b64.b64encode(_jpg.getvalue()).decode())
+_wrapped = "data:image/png;base64," + "\n".join(PNG[i:i + 20] for i in range(0, len(PNG), 20))
+check("data: URI + line-wrapped b64 accepted", _ig.decode_b64_png(_wrapped, "x") == _b64.b64decode(PNG))
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)

@@ -265,33 +265,34 @@ async def create_wallet_pass(
 
         files: dict[str, bytes] = {}
         if icon_png_b64:
-            files["icon.png"] = image_gen.decode_b64_png(icon_png_b64)
+            files["icon.png"] = image_gen.decode_b64_png(icon_png_b64, "icon_png_b64")
         else:
             files.update(image_gen.icon_set(icon_color, icon_text or organization_name))
         if logo_png_b64:
-            files["logo.png"] = image_gen.decode_b64_png(logo_png_b64)
+            files["logo.png"] = image_gen.decode_b64_png(logo_png_b64, "logo_png_b64")
         elif generate_logo:
             files.update(image_gen.logo_set(logo_color or icon_color, logo_text or organization_name))
         if poster:
             if background_png_b64:
-                files["background.png"] = image_gen.decode_b64_png(background_png_b64)
+                files["background.png"] = image_gen.decode_b64_png(background_png_b64, "background_png_b64")
             else:
                 files.update(image_gen.background_set(background_color or icon_color))
         elif background_png_b64 and style == "eventTicket":
-            files["background.png"] = image_gen.decode_b64_png(background_png_b64)
+            files["background.png"] = image_gen.decode_b64_png(background_png_b64, "background_png_b64")
         if semantic_layout and style == "eventTicket":
             if artwork_png_b64:
-                files["artwork.png"] = image_gen.decode_b64_png(artwork_png_b64)
+                files["artwork.png"] = image_gen.decode_b64_png(artwork_png_b64, "artwork_png_b64")
             elif not background_png_b64:  # Wallet needs one of the two
                 files.update(image_gen.artwork_set(background_color or icon_color))
         if primary_logo_png_b64:
-            files["primaryLogo.png"] = image_gen.decode_b64_png(primary_logo_png_b64)
+            files["primaryLogo.png"] = image_gen.decode_b64_png(primary_logo_png_b64, "primary_logo_png_b64")
         elif (poster or semantic_layout) and generate_logo:
             files.update(image_gen.primary_logo_set(foreground_color or "#ffffff", logo_text or organization_name))
-        for name, b64 in (("secondaryLogo", secondary_logo_png_b64), ("strip", strip_png_b64),
-                          ("thumbnail", thumbnail_png_b64)):
+        for name, param, b64 in (("secondaryLogo", "secondary_logo_png_b64", secondary_logo_png_b64),
+                                 ("strip", "strip_png_b64", strip_png_b64),
+                                 ("thumbnail", "thumbnail_png_b64", thumbnail_png_b64)):
             if b64:
-                files[f"{name}.png"] = image_gen.decode_b64_png(b64)
+                files[f"{name}.png"] = image_gen.decode_b64_png(b64, param)
 
         pkpass_bytes = pass_builder.build_pkpass(pass_dict, files)
         token = _register_download(pkpass_bytes)
