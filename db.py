@@ -5,6 +5,7 @@ import datetime
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("WALLET_MCP_DB", Path(__file__).parent / "data" / "wallet-mcp.db"))
@@ -57,10 +58,15 @@ def init() -> None:
                 params TEXT NOT NULL,
                 pkpass BLOB NOT NULL,
                 created TEXT NOT NULL,
-                updated INTEGER NOT NULL
+                updated INTEGER NOT NULL,
+                expires INTEGER NOT NULL
             )
             """
         )
+        # Passes stored before update windows existed have no expiry; purge them on the next sweep.
+        pass_columns = {row["name"] for row in conn.execute("PRAGMA table_info(passes)")}
+        if "expires" not in pass_columns:
+            conn.execute("ALTER TABLE passes ADD COLUMN expires INTEGER NOT NULL DEFAULT 0")
         # Devices that installed an updatable pass, registered by Wallet itself.
         conn.execute(
             """
@@ -125,17 +131,32 @@ def pass_exists(serial: str) -> bool:
         return conn.execute("SELECT 1 FROM passes WHERE serial = ?", (serial,)).fetchone() is not None
 
 
-def store_pass(serial: str, auth_token: str, edit_hash: str, params: str, pkpass: bytes, updated: int) -> None:
+def store_pass(serial: str, auth_token: str, edit_hash: str, params: str, pkpass: bytes, updated: int,
+               expires: int) -> None:
     with _lock, _conn() as conn:
         conn.execute(
-            "INSERT INTO passes (serial, auth_token, edit_hash, params, pkpass, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (serial, auth_token, edit_hash, params, pkpass, _now(), updated),
+            """INSERT INTO passes (serial, auth_token, edit_hash, params, pkpass, created, updated, expires)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (serial, auth_token, edit_hash, params, pkpass, _now(), updated, expires),
         )
 
 
 def get_pass(serial: str) -> sqlite3.Row | None:
+    """A stored pass still inside its update window (expired ones count as gone before the sweep)."""
     with _lock, _conn() as conn:
-        return conn.execute("SELECT * FROM passes WHERE serial = ?", (serial,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM passes WHERE serial = ? AND expires > ?", (serial, int(time.time()))
+        ).fetchone()
+
+
+def purge_expired_passes() -> int:
+    """Delete passes whose update window has ended, with their device registrations."""
+    now = int(time.time())
+    with _lock, _conn() as conn:
+        conn.execute(
+            "DELETE FROM registrations WHERE serial IN (SELECT serial FROM passes WHERE expires <= ?)", (now,)
+        )
+        return conn.execute("DELETE FROM passes WHERE expires <= ?", (now,)).rowcount
 
 
 def replace_pass(serial: str, params: str, pkpass: bytes, updated: int) -> None:
@@ -192,8 +213,8 @@ def device_serials(device: str, updated_since: int | None) -> list[sqlite3.Row]:
     with _lock, _conn() as conn:
         return conn.execute(
             """SELECT p.serial, p.updated FROM registrations r JOIN passes p ON p.serial = r.serial
-               WHERE r.device = ? AND p.updated > ?""",
-            (device, updated_since or 0),
+               WHERE r.device = ? AND p.updated > ? AND p.expires > ?""",
+            (device, updated_since or 0, int(time.time())),
         ).fetchall()
 
 
