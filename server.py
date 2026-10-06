@@ -28,6 +28,7 @@ import threading
 import time
 import traceback
 import uuid
+from dataclasses import dataclass
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
@@ -107,6 +108,50 @@ threading.Thread(target=_sweep_downloads, daemon=True).start()
 
 def _client_ip(request: Request) -> str:
     return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+
+
+# x402 payment carriers: the MCP transport's _meta key, and the HTTP headers of x402 v1 and v2.
+X402_META_KEY = "x402/payment"
+X402_HEADERS = ("x-payment", "payment-signature")
+
+
+@dataclass(frozen=True)
+class Caller:
+    """Who made a request, as recorded in the log. Nothing is charged yet: x402 only notes whether
+    the caller sent a payment, to see which clients could pay before pricing goes live."""
+    ip: str
+    source: str  # "mcp" or "api"
+    client: str | None = None  # MCP clientInfo "name/version", else the User-Agent
+    x402: bool = False
+
+    @classmethod
+    def from_mcp(cls, ctx: Context) -> "Caller":
+        rctx = ctx.request_context
+        request = rctx.request
+        params = rctx.session.client_params
+        if params is not None:
+            client = f"{params.client_info.name}/{params.client_info.version}"
+        else:
+            client = request.headers.get("user-agent") if request is not None else None
+        return cls(
+            ip=_client_ip(request) if request is not None else "stdio",
+            source="mcp",
+            client=client,
+            x402=X402_META_KEY in (rctx.meta or {}),
+        )
+
+    @classmethod
+    def from_api(cls, request: Request) -> "Caller":
+        return cls(
+            ip=_client_ip(request),
+            source="api",
+            client=request.headers.get("user-agent"),
+            x402=any(h in request.headers for h in X402_HEADERS),
+        )
+
+
+def _log(caller: Caller, **fields) -> None:
+    db.log_request(ip=caller.ip, source=caller.source, client=caller.client, x402=caller.x402, **fields)
 
 
 PUBLIC_BASE_URL = os.environ.get("WALLET_MCP_PUBLIC_URL", "https://vps.arshwaraich.com/wallet-mcp")
@@ -311,10 +356,9 @@ async def create_wallet_pass(
 
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
-    request = ctx.request_context.request
-    ip = _client_ip(request) if request is not None else "stdio"
+    caller = Caller.from_mcp(ctx)
     try:
-        return await anyio.to_thread.run_sync(lambda: _create_pass(ip, "mcp", **params))
+        return await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params))
     except PassRejected as e:
         raise ToolError(e.message) from None
 
@@ -392,10 +436,9 @@ async def update_wallet_pass(
     new device.
     """
     changes = {k: v for k, v in locals().items() if k not in ("ctx", "serial_number", "edit_token")}
-    request = ctx.request_context.request
-    ip = _client_ip(request) if request is not None else "stdio"
+    caller = Caller.from_mcp(ctx)
     try:
-        return await anyio.to_thread.run_sync(lambda: _update_pass(ip, "mcp", serial_number, edit_token, changes))
+        return await anyio.to_thread.run_sync(lambda: _update_pass(caller, serial_number, edit_token, changes))
     except PassRejected as e:
         raise ToolError(e.message) from None
 
@@ -410,8 +453,7 @@ class PassRejected(Exception):
 
 
 def _create_pass(
-    ip: str,
-    source: str,
+    caller: Caller,
     *,
     style: str,
     organization_name: str,
@@ -456,10 +498,10 @@ def _create_pass(
     updatable: bool = False,
     updatable_hours: int = 1,
 ) -> dict:
-    """Rate-limit, build, sign and log one pass. `source` is "mcp" or "api", recorded in the log."""
-    params = {k: v for k, v in locals().items() if k not in ("ip", "source", "serial_number", "updatable", "updatable_hours")}
+    """Rate-limit, build, sign and log one pass."""
+    params = {k: v for k, v in locals().items() if k not in ("caller", "serial_number", "updatable", "updatable_hours")}
     start = time.monotonic()
-    _check_rate_limit(ip, source, "create", style, organization_name)
+    _check_rate_limit(caller, "create", style, organization_name)
 
     serial = serial_number or str(uuid.uuid4())
     try:
@@ -490,16 +532,16 @@ def _create_pass(
             result["edit_token"] = edit_token
             result["updatable_until"] = _iso(expires)
     except Exception as e:
-        _log_failure(e, ip, source, "create", style, organization_name, serial, start)
+        _log_failure(e, caller, "create", style, organization_name, serial, start)
         raise _rejection(e) from None
-    db.log_request(
-        ip=ip, style=style, organization_name=organization_name, success=True, error=None,
-        duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial, source=source,
+    _log(
+        caller, style=style, organization_name=organization_name, success=True, error=None,
+        duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial,
     )
     return result
 
 
-def _update_pass(ip: str, source: str, serial_number: str, edit_token: str, changes: dict) -> dict:
+def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: dict) -> dict:
     """Merge `changes` into a stored updatable pass, re-sign it, and push it to installed devices."""
     start = time.monotonic()
     row = db.get_pass(serial_number)
@@ -513,7 +555,7 @@ def _update_pass(ip: str, source: str, serial_number: str, edit_token: str, chan
         raise PassRejected("nothing to update: pass at least one field to change", 400)
     style = changes.get("style", params["style"])
     organization_name = changes.get("organization_name", params["organization_name"])
-    _check_rate_limit(ip, source, "update", style, organization_name)
+    _check_rate_limit(caller, "update", style, organization_name)
     try:
         params.update(_resolve_image_urls(changes))
         pkpass_bytes = _build_pkpass(params, serial_number, row["auth_token"])
@@ -523,12 +565,11 @@ def _update_pass(ip: str, source: str, serial_number: str, edit_token: str, chan
         notified, dead = apns.push(db.push_tokens(serial_number))
         db.drop_push_tokens(serial_number, dead)
     except Exception as e:
-        _log_failure(e, ip, source, "update", style, organization_name, serial_number, start)
+        _log_failure(e, caller, "update", style, organization_name, serial_number, start)
         raise _rejection(e) from None
-    db.log_request(
-        ip=ip, style=style, organization_name=organization_name, success=True, error=None,
-        duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial_number,
-        source=source, action="update",
+    _log(
+        caller, style=style, organization_name=organization_name, success=True, error=None,
+        duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial_number, action="update",
     )
     return {
         "download_url": f"{PUBLIC_BASE_URL}/download/{_register_download(pkpass_bytes)}",
@@ -548,25 +589,25 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _check_rate_limit(ip: str, source: str, action: str, style: str, organization_name: str) -> None:
-    rejection = db.check_rate_limit(ip)
+def _check_rate_limit(caller: Caller, action: str, style: str, organization_name: str) -> None:
+    rejection = db.check_rate_limit(caller.ip)
     if rejection:
-        db.log_request(
-            ip=ip, style=style, organization_name=organization_name, success=False,
-            error=rejection, duration_ms=0, serial_number=None, source=source, action=action,
+        _log(
+            caller, style=style, organization_name=organization_name, success=False,
+            error=rejection, duration_ms=0, serial_number=None, action=action,
         )
         raise PassRejected(rejection, 429)
 
 
-def _log_failure(e: Exception, ip, source, action, style, organization_name, serial, start) -> None:
+def _log_failure(e: Exception, caller, action, style, organization_name, serial, start) -> None:
     if isinstance(e, pass_builder.PassBuildError):
         error = str(e)
     else:
         logger.error("unexpected error building pass: %s", traceback.format_exc())
         error = f"internal error: {e}"
-    db.log_request(
-        ip=ip, style=style, organization_name=organization_name, success=False, error=error,
-        duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial, source=source, action=action,
+    _log(
+        caller, style=style, organization_name=organization_name, success=False, error=error,
+        duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial, action=action,
     )
 
 
@@ -679,8 +720,8 @@ async def api_create_pass(request: Request) -> Response:
     except ValidationError as e:
         return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
     try:
-        ip = _client_ip(request)
-        return JSONResponse(await anyio.to_thread.run_sync(lambda: _create_pass(ip, "api", **params)))
+        caller = Caller.from_api(request)
+        return JSONResponse(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params)))
     except PassRejected as e:
         return JSONResponse({"error": e.message}, status_code=e.status)
     except Exception:
@@ -715,10 +756,10 @@ async def api_update_pass(request: Request) -> Response:
         changes = _UpdateRequest.model_validate(body).model_dump()
     except ValidationError as e:
         return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
-    serial, ip = request.path_params["serial"], _client_ip(request)
+    serial, caller = request.path_params["serial"], Caller.from_api(request)
     try:
         return JSONResponse(await anyio.to_thread.run_sync(
-            lambda: _update_pass(ip, "api", serial, edit_token.strip(), changes)))
+            lambda: _update_pass(caller, serial, edit_token.strip(), changes)))
     except PassRejected as e:
         return JSONResponse({"error": e.message}, status_code=e.status)
     except Exception:

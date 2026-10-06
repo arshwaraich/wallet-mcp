@@ -47,6 +47,12 @@ def init() -> None:
         # action = "create" or "update"; rows from before updates existed were all creates.
         if "action" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN action TEXT NOT NULL DEFAULT 'create'")
+        # client = MCP clientInfo "name/version" or the User-Agent; x402 = 1 if the caller sent an
+        # x402 payment. Both recorded to gauge payment support before pricing; old rows are NULL.
+        if "client" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN client TEXT")
+        if "x402" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN x402 INTEGER")
         # Updatable passes only (updatable=True). Unlike the request log, this keeps the
         # pass's full contents, since an update rebuilds the pass from them.
         conn.execute(
@@ -107,14 +113,17 @@ def check_rate_limit(ip: str) -> str | None:
 def log_request(
     *, ip: str, style: str, organization_name: str, success: bool,
     error: str | None, duration_ms: int, serial_number: str | None, source: str, action: str = "create",
+    client: str | None = None, x402: bool = False,
 ) -> None:
     with _lock, _conn() as conn:
         conn.execute(
-            """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number, source, action)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number,
+                                     source, action, client, x402)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source, action,
+                client, 1 if x402 else 0,
             ),
         )
 
