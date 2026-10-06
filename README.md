@@ -1,8 +1,8 @@
 # wallet-mcp
 
-An MCP server that signs [Apple Wallet](https://developer.apple.com/wallet/) (`.pkpass`) passes on request. Point any MCP client (Claude Desktop, Claude.ai custom connector, or anything else speaking Streamable HTTP MCP) at it and ask it to build a boarding pass, event ticket, coupon, store card, or generic pass — it comes back with a signed pass and a temporary download link.
+An MCP server that signs [Apple Wallet](https://developer.apple.com/wallet/) (`.pkpass`) passes on request. Point any MCP client (Claude Desktop, Claude.ai custom connector, or anything else speaking Streamable HTTP MCP) at it and ask it to build a boarding pass, event ticket, coupon, store card, or generic pass — it comes back with a signed pass and a temporary download link. Not using an MCP client? The same thing is a plain REST endpoint, `POST /api/passes`.
 
-**Hosted instance:** [walletmcppass.com](https://walletmcppass.com) — MCP endpoint at `https://walletmcppass.com/mcp`, free during open beta.
+**Hosted instance:** [walletmcppass.com](https://walletmcppass.com) — MCP endpoint at `https://walletmcppass.com/mcp`, REST API at `https://walletmcppass.com/api/passes`, free during open beta.
 
 Free to call, rate-limited, with a small usage dashboard. No API key today; a payment layer is meant to slot in later without changing the tool's interface.
 
@@ -12,14 +12,15 @@ Building a `.pkpass` by hand means writing `pass.json`, generating icon/logo art
 
 ## How it works
 
-One process, one port, three things on it:
+One process, one port, four things on it:
 
 - **The MCP endpoint** (Streamable HTTP) at `/mcp` — the `create_wallet_pass` tool.
+- **The REST API** at `POST /api/passes` — the same pass builder for non-MCP callers. It shares the rate limits and request log with the tool; each logged request records which one it came through (`source` = `mcp` or `api`).
 - **A usage dashboard** at `/` and `/api/stats` — request counts, success/error rate, recent activity, all read from a local SQLite log.
 - **Short-lived download links** at `/download/{token}` — built passes are served with the correct `application/vnd.apple.pkpass` content type (required for Wallet to recognize the file) and expire after 1 hour, swept by file mtime so a crash/restart can't leak files.
 
 ```
-server.py        MCPServer instance: the tool + custom HTTP routes (dashboard, stats, downloads)
+server.py        MCPServer instance: the tool + custom HTTP routes (REST API, dashboard, stats, downloads)
 pass_builder.py  Builds pass.json per style, signs the manifest with openssl smime, zips the .pkpass
 image_gen.py     Pillow-based icon/logo generation (colored square + initials / wordmark)
 db.py            SQLite request log + per-IP and global daily rate limits
@@ -65,6 +66,26 @@ primary_logo_png_b64, secondary_logo_png_b64, strip_png_b64, thumbnail_png_b64, 
 
 Returns `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }`. The download link is valid for one hour.
 
+## The REST API: `POST /api/passes`
+
+The JSON body takes exactly the tool's parameters above. The request model is generated from the same function signature, so the two can't drift apart. Unknown keys are rejected.
+
+```sh
+curl https://walletmcppass.com/api/passes \
+  -H 'Content-Type: application/json' \
+  -d '{"style": "generic", "organization_name": "Harbor Climbing Gym", "description": "Day pass",
+       "primary_fields": [{"label": "Guest", "value": "Ada L."}], "barcode_message": "DAY-0042"}'
+```
+
+| Status | Body |
+|---|---|
+| 200 | Same as the tool: `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }` |
+| 400 | `{"error": "invalid request", "details": [...]}` for a malformed body or wrong types; `{"error": "..."}` when the pass itself is invalid |
+| 429 | `{"error": "rate limit exceeded: ..."}` — the same limit as MCP, counted across both |
+| 500 | `{"error": "internal error building the pass"}` |
+
+As with the tool, bodies that fail schema validation are rejected before the rate limiter and aren't logged; pass-builder errors are logged and do count.
+
 ## Deploying your own instance
 
 You need your own Apple Developer **Pass Type ID certificate** — the one in this repo's design (`pass_builder.py`) is not included, and can't be, since it's a private key tied to a specific Apple Developer account. To stand this up:
@@ -83,7 +104,7 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
      .venv/bin/python server.py
    ```
    `WALLET_MCP_PUBLIC_HOST` matters: the MCP SDK has DNS-rebinding protection on by default and will reject every request with a 421 unless the request's `Host` header is in the allowed list — set this to whatever hostname the server is actually reached at.
-5. Put a reverse proxy (nginx, Caddy, etc.) in front of it with TLS. If you use nginx, the Streamable HTTP transport needs:
+5. Put a reverse proxy (nginx, Caddy, etc.) in front of it with TLS, exposing `/mcp`, `/download/` and `/api/passes` (but not `/` or `/api/stats`, which are the private dashboard). If you use nginx, the Streamable HTTP transport needs:
    ```
    proxy_http_version 1.1;
    proxy_set_header Connection "";
@@ -95,7 +116,7 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 
 ## Rate limiting
 
-No API key — anyone with the URL can call the tool. Protected only by daily caps in `db.py`: 30 requests/day per caller IP, 500/day globally as a backstop. If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
+No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 30 requests/day per caller IP, 500/day globally as a backstop, counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
 
 ## Gotchas worth knowing before you touch pass_builder.py or image_gen.py
 

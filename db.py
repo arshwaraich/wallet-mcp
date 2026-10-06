@@ -1,16 +1,19 @@
-"""SQLite usage log for the wallet-mcp dashboard, plus IP/global daily rate limits."""
+"""SQLite usage log for the wallet-mcp dashboard, plus IP/global daily rate limits.
+
+MCP and REST API calls share one log, so the limits cover both combined."""
 import datetime
+import os
 import sqlite3
 import threading
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "wallet-mcp.db"
+DB_PATH = Path(os.environ.get("WALLET_MCP_DB", Path(__file__).parent / "data" / "wallet-mcp.db"))
 DB_PATH.parent.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
 
-PER_IP_DAILY_LIMIT = 30
-GLOBAL_DAILY_LIMIT = 500
+PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 30))
+GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
 
 
 def _conn() -> sqlite3.Connection:
@@ -36,6 +39,10 @@ def init() -> None:
             )
             """
         )
+        # source = "mcp" or "api"; rows from before the REST API existed were all MCP.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(requests)")}
+        if "source" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN source TEXT NOT NULL DEFAULT 'mcp'")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ip ON requests(ip)")
 
@@ -64,15 +71,15 @@ def check_rate_limit(ip: str) -> str | None:
 
 def log_request(
     *, ip: str, style: str, organization_name: str, success: bool,
-    error: str | None, duration_ms: int, serial_number: str | None,
+    error: str | None, duration_ms: int, serial_number: str | None, source: str,
 ) -> None:
     with _lock, _conn() as conn:
         conn.execute(
-            """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number,
+                ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source,
             ),
         )
 
@@ -92,13 +99,16 @@ def stats() -> dict:
         by_style = conn.execute(
             "SELECT style, COUNT(*) c FROM requests GROUP BY style ORDER BY c DESC"
         ).fetchall()
+        by_source = conn.execute(
+            "SELECT source, COUNT(*) c FROM requests GROUP BY source ORDER BY c DESC"
+        ).fetchall()
         by_day = conn.execute(
             """SELECT substr(ts, 1, 10) day, COUNT(*) c, SUM(success) ok
                FROM requests WHERE ts >= ? GROUP BY day ORDER BY day""",
             (week_ago,),
         ).fetchall()
         recent = conn.execute(
-            """SELECT ts, ip, style, organization_name, success, error, duration_ms
+            """SELECT ts, ip, source, style, organization_name, success, error, duration_ms
                FROM requests ORDER BY id DESC LIMIT 25"""
         ).fetchall()
         unique_ips_total, = conn.execute("SELECT COUNT(DISTINCT ip) FROM requests").fetchone()
@@ -110,6 +120,7 @@ def stats() -> dict:
         "week": week_count,
         "unique_ips_total": unique_ips_total,
         "by_style": [dict(r) for r in by_style],
+        "by_source": [dict(r) for r in by_source],
         "by_day": [dict(r) for r in by_day],
         "recent": [dict(r) for r in recent],
     }
