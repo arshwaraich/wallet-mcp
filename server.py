@@ -16,6 +16,7 @@ can be layered on top of the rate limiter later without changing the tool
 interface.
 """
 import base64
+import datetime
 import hashlib
 import inspect
 import json
@@ -56,6 +57,7 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 DASHBOARD_HTML = (BASE_DIR / "dashboard.html").read_text()
 
 DOWNLOAD_TTL_SECONDS = 60 * 60  # 1 hour, matches fileshare.py's convention
+MAX_UPDATABLE_HOURS = 30 * 24  # updatable passes are stored for 1 hour by default, at most 30 days
 DEFAULT_ICON_COLOR = "#c98500"  # site accent color
 
 db.init()
@@ -84,6 +86,12 @@ def _register_download(data: bytes) -> str:
 
 def _sweep_downloads() -> None:
     while True:
+        try:
+            purged = db.purge_expired_passes()
+            if purged:
+                logger.info("deleted %d updatable pass(es) whose update window ended", purged)
+        except Exception:
+            logger.error("purging expired passes failed: %s", traceback.format_exc())
         now = time.time()
         for path in DOWNLOAD_DIR.glob("*.pkpass"):
             try:
@@ -157,6 +165,7 @@ async def create_wallet_pass(
     locations: list[dict] | None = None,
     max_distance: float | None = None,
     updatable: bool = False,
+    updatable_hours: int = 1,
 ) -> dict:
     """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
 
@@ -179,10 +188,11 @@ async def create_wallet_pass(
     files. Not supported: NFC passes.
 
     With updatable=True the pass can be changed later with update_wallet_pass, and copies
-    already in Wallet refresh themselves. Its contents are then stored on this server.
+    already in Wallet refresh themselves. Its contents are then stored on this server for
+    updatable_hours (1 hour by default, at most 30 days), then deleted.
 
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus
-    edit_token when updatable=True.
+    edit_token and updatable_until when updatable=True.
 
     Args:
         style: one of "boardingPass", "eventTicket", "coupon", "generic", "storeCard".
@@ -294,6 +304,10 @@ async def create_wallet_pass(
             update reaches them within seconds. The pass contents are stored (other passes only log
             the style and organization_name). Use for passes that change: loyalty points, gate or seat
             changes, memberships that can be cancelled.
+        updatable_hours: how long an updatable pass can be updated, 1 (default) to 720 (30 days),
+            counted from creation; updates don't extend it. Afterwards the stored pass is deleted and
+            can't be changed again, while copies in Wallet stay as they last were. Pick it to cover
+            the pass's useful life, e.g. until a flight lands or an event ends. Only with updatable=True.
 
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
@@ -370,8 +384,10 @@ async def update_wallet_pass(
     Wallet asks the server for the new version as soon as Apple delivers the push, usually within
     seconds. A field's changeMessage is shown on the lock screen when that field's value changes.
 
+    Only works until the pass's updatable_until time (set by updatable_hours at creation).
+
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier,
-    notified_devices}. notified_devices counts the iPhones the push was sent to, not ones that
+    notified_devices, updatable_until}. notified_devices counts the iPhones the push was sent to, not ones that
     have already refreshed. The download_url (valid 1 hour) is only needed to add the pass to a
     new device.
     """
@@ -438,14 +454,21 @@ def _create_pass(
     locations: list[dict] | None = None,
     max_distance: float | None = None,
     updatable: bool = False,
+    updatable_hours: int = 1,
 ) -> dict:
     """Rate-limit, build, sign and log one pass. `source` is "mcp" or "api", recorded in the log."""
-    params = {k: v for k, v in locals().items() if k not in ("ip", "source", "serial_number", "updatable")}
+    params = {k: v for k, v in locals().items() if k not in ("ip", "source", "serial_number", "updatable", "updatable_hours")}
     start = time.monotonic()
     _check_rate_limit(ip, source, "create", style, organization_name)
 
     serial = serial_number or str(uuid.uuid4())
     try:
+        if not updatable and updatable_hours != 1:
+            raise pass_builder.PassBuildError("updatable_hours only applies with updatable=True")
+        if not 1 <= updatable_hours <= MAX_UPDATABLE_HOURS:
+            raise pass_builder.PassBuildError(
+                f"updatable_hours must be between 1 and {MAX_UPDATABLE_HOURS} (30 days), got {updatable_hours!r}"
+            )
         if updatable and db.pass_exists(serial):
             raise pass_builder.PassBuildError(
                 f"serial_number {serial!r} is already used by another updatable pass; omit it to get a fresh one"
@@ -461,8 +484,11 @@ def _create_pass(
         }
         if updatable:
             edit_token = secrets.token_urlsafe(24)
-            db.store_pass(serial, auth_token, _hash_token(edit_token), json.dumps(params), pkpass_bytes, int(time.time()))
+            expires = int(time.time()) + updatable_hours * 3600
+            db.store_pass(serial, auth_token, _hash_token(edit_token), json.dumps(params), pkpass_bytes,
+                          int(time.time()), expires)
             result["edit_token"] = edit_token
+            result["updatable_until"] = _iso(expires)
     except Exception as e:
         _log_failure(e, ip, source, "create", style, organization_name, serial, start)
         raise _rejection(e) from None
@@ -479,7 +505,8 @@ def _update_pass(ip: str, source: str, serial_number: str, edit_token: str, chan
     row = db.get_pass(serial_number)
     if row is None or not secrets.compare_digest(row["edit_hash"], _hash_token(edit_token)):
         # One message for both cases, so serials can't be probed without their token.
-        raise PassRejected("unknown serial_number, or wrong edit_token for it", 404)
+        raise PassRejected(
+            "unknown serial_number, wrong edit_token, or the pass's update window (updatable_hours) has ended", 404)
     params = json.loads(row["params"])
     changes = {k: v for k, v in changes.items() if v is not None}
     if not changes:
@@ -509,7 +536,12 @@ def _update_pass(ip: str, source: str, serial_number: str, edit_token: str, chan
         "serial_number": serial_number,
         "pass_type_identifier": pass_builder.PASS_TYPE_IDENTIFIER,
         "notified_devices": notified,
+        "updatable_until": _iso(row["expires"]),
     }
+
+
+def _iso(epoch: int) -> str:
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _hash_token(token: str) -> str:

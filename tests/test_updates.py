@@ -1,7 +1,7 @@
 """End-to-end tests for updatable passes (PassKit web service + APNs push) and image URLs.
 Starts a real server on a spare port with a throwaway db and a fake APNs, never the production ones.
 Run: .venv/bin/python tests/test_updates.py"""
-import asyncio, inspect, io, json, os, socket, subprocess, sys, tempfile, threading, time, zipfile
+import asyncio, datetime, inspect, io, json, os, sqlite3, socket, subprocess, sys, tempfile, threading, time, zipfile
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -57,7 +57,8 @@ threading.Thread(target=apns.serve_forever, daemon=True).start()
 tmp = tempfile.mkdtemp()
 port = free_port()
 base = f"http://127.0.0.1:{port}"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(Path(tmp) / "test.db"), WALLET_MCP_IP_LIMIT="100",
+db_path = Path(tmp) / "test.db"
+env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT="100",
            WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}",
            WALLET_MCP_APNS_URL=f"http://127.0.0.1:{apns_port}")
 proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
@@ -82,8 +83,10 @@ try:
     pj = pass_json(httpx.get(plain["download_url"]).content)
     check("plain pass has no webServiceURL", "webServiceURL" not in pj and "authenticationToken" not in pj, pj)
 
-    r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True})
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True, "updatable_hours": 2})
     created = r.json()
+    until = datetime.datetime.fromisoformat(created.get("updatable_until", "1970-01-01T00:00:00+00:00")).timestamp()
+    check("updatable_until is updatable_hours from now", abs(until - (time.time() + 7200)) < 60, created)
     check("updatable create: 200 with edit_token", r.status_code == 200 and "edit_token" in created, r.text)
     serial, edit_token = created["serial_number"], created["edit_token"]
     pj = pass_json(httpx.get(created["download_url"]).content)
@@ -96,6 +99,17 @@ try:
 
     r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True, "serial_number": serial})
     check("updatable create refuses a serial already in use", r.status_code == 400, r.text)
+
+    for bad in (0, 721, -5):
+        r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True, "updatable_hours": bad})
+        check(f"updatable_hours={bad!r} refused", r.status_code == 400, r.text)
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable_hours": 5})
+    check("updatable_hours without updatable refused", r.status_code == 400, r.text)
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True, "updatable_hours": 720})
+    check("updatable_hours=720 (30 days) accepted", r.status_code == 200, r.text)
+    default = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True}).json()
+    until = datetime.datetime.fromisoformat(default["updatable_until"]).timestamp()
+    check("default update window is 1 hour", abs(until - (time.time() + 3600)) < 60, default)
 
     # --- device registration (what Wallet does after the pass is added) ---
     PT = "pass.com.arshwaraich.vps"
@@ -176,6 +190,23 @@ try:
     r = httpx.delete(reg("dev1"), headers=ok_auth)
     check("unregister: 200", r.status_code == 200, r.status_code)
 
+    # --- update window ending ---
+    httpx.post(reg("dev3"), json={"pushToken": LIVE_TOKEN}, headers=ok_auth)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE passes SET expires = ? WHERE serial = ?", (int(time.time()) - 1, serial))
+    r = patch({"voided": False})
+    check("expired window: update refused with a reason", r.status_code == 404 and "update window" in r.text, r.text)
+    check("expired window: Wallet can no longer fetch it", httpx.get(latest, headers=ok_auth).status_code == 401)
+    check("expired window: not listed as updated", httpx.get(f"{base}/passkit/v1/devices/dev3/registrations/{PT}").status_code == 204)
+    for _ in range(40):  # the sweeper runs every 30s
+        with sqlite3.connect(db_path) as conn:
+            left = conn.execute("SELECT (SELECT COUNT(*) FROM passes WHERE serial = ?) + "
+                                "(SELECT COUNT(*) FROM registrations WHERE serial = ?)", (serial, serial)).fetchone()[0]
+        if not left:
+            break
+        time.sleep(1)
+    check("expired window: stored pass and registrations deleted", left == 0, left)
+
     # --- image URLs ---
     for url, why in (("http://walletmcppass.com/icon-192.png", "http"), ("https://127.0.0.1/x.png", "loopback"),
                      ("https://169.254.169.254/latest", "link-local metadata"), ("https://100.119.64.32/x.png", "tailnet")):
@@ -195,7 +226,7 @@ finally:
 sys.path.insert(0, str(ROOT))
 os.environ["WALLET_MCP_DB"] = str(Path(tmp) / "sig.db")
 import server  # noqa: E402
-create = set(inspect.signature(server.create_wallet_pass).parameters) - {"ctx", "serial_number", "updatable"}
+create = set(inspect.signature(server.create_wallet_pass).parameters) - {"ctx", "serial_number", "updatable", "updatable_hours"}
 update = set(inspect.signature(server.update_wallet_pass).parameters) - {"ctx", "serial_number", "edit_token"}
 check("update tool params match create tool params", create == update, create ^ update)
 
