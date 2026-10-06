@@ -145,6 +145,8 @@ async def create_wallet_pass(
     strip_png_b64: str | None = None,
     thumbnail_png_b64: str | None = None,
     artwork_png_b64: str | None = None,
+    locations: list[dict] | None = None,
+    max_distance: float | None = None,
 ) -> dict:
     """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
 
@@ -162,7 +164,9 @@ async def create_wallet_pass(
     PDF417 or Aztec, holding an IATA BCBP string such as "M1DOE/JANE ..."). This tool does not issue
     tickets, check anyone in, or contact airlines or venues.
 
-    Not supported: NFC passes, updating a pass after it is issued, Google Wallet.
+    The link must be opened in Safari on the iPhone: Wallet adds a pass from Safari, but not
+    from a .pkpass file handed over by another app. Google Wallet on Android also imports these
+    files. Not supported: NFC passes, or updating a pass after it is issued.
 
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}.
 
@@ -182,6 +186,15 @@ async def create_wallet_pass(
         barcode_alt_text: human-readable text shown under the barcode (e.g. the card number).
         background_color / foreground_color / label_color: hex colors, e.g. "#1a1a19".
         relevant_date / expiration_date: ISO 8601 timestamps.
+        locations: up to 10 places where the pass appears on the lock screen when the iPhone is
+            nearby, each {"latitude": float, "longitude": float, "altitude": optional float,
+            "relevantText": optional str shown on the lock screen, e.g. "Your gym card"}. Look up
+            the coordinates of the actual branch, not just the brand. For boardingPass and
+            eventTicket the pass is relevant near a location around relevant_date if one is set;
+            the other styles use location alone. Wallet only shows a pass within its own default
+            radius of a location, which is small for store cards and coupons.
+        max_distance: meters; shrinks the default radius around every location (Wallet uses the
+            smaller of the two, so it cannot enlarge it). Requires locations.
         voided: mark the pass voided/used (shows a "VOID" stamp).
         primary_fields / secondary_fields / auxiliary_fields / header_fields / back_fields:
             lists of {"key": optional str, "label": optional str, "value": str} shown on the pass.
@@ -315,6 +328,8 @@ def _create_pass(
     strip_png_b64: str | None = None,
     thumbnail_png_b64: str | None = None,
     artwork_png_b64: str | None = None,
+    locations: list[dict] | None = None,
+    max_distance: float | None = None,
 ) -> dict:
     """Rate-limit, build, sign and log one pass. `source` is "mcp" or "api", recorded in the log."""
     start = time.monotonic()
@@ -355,6 +370,8 @@ def _create_pass(
             semantics=semantics,
             semantic_layout=semantic_layout,
             info_links=info_links,
+            locations=locations,
+            max_distance=max_distance,
         )
 
         files: dict[str, bytes] = {}

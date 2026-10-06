@@ -112,6 +112,8 @@ barcode_message, barcode_format       # format name or ordered list, e.g. ["EAN1
 barcode_alt_text                      # human-readable text under the barcode
 background_color, foreground_color, label_color   # hex "#1a1a19" or "rgb(26, 26, 25)"
 relevant_date, expiration_date        # ISO 8601
+locations                              # up to 10 of {latitude, longitude, altitude?, relevantText?}: show on the lock screen nearby
+max_distance                           # meters; can only shrink Wallet's default radius around each location
 voided                                 # stamps the pass VOID
 primary_fields, secondary_fields, auxiliary_fields, header_fields, back_fields
                                        # lists of {key?, label?, value}
@@ -136,7 +138,7 @@ info_links                             # top-level event-guide / airline-page li
 primary_logo_png_b64, secondary_logo_png_b64, strip_png_b64, thumbnail_png_b64, artwork_png_b64
 ```
 
-Returns `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }`. The download link is valid for one hour.
+Returns `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }`. The download link is valid for one hour. Open it in Safari on the iPhone; Wallet won't add a `.pkpass` handed over by another app. Google Wallet on Android imports the same file.
 
 ## The REST API: `POST /api/passes`
 

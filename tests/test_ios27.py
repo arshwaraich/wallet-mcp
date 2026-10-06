@@ -125,5 +125,22 @@ with tempfile.TemporaryDirectory() as t:
 check("pkpass: signature verifies over manifest", r.returncode == 0, r.stderr)
 check("pkpass: background@3x is 1035x1515", __import__("PIL.Image").Image.open(io.BytesIO(z["background@3x.png"])).size == (1035, 1515))
 
+# --- locations: lock-screen relevance near a place
+locs = [{"latitude": 19.0760, "longitude": 72.8777, "relevantText": "Your gym card"},
+        {"latitude": -33.86, "longitude": 151.21, "altitude": 12.5}]
+d = pb.build_pass_json(style="storeCard", locations=locs, max_distance=150, **BASE)
+check("locations: emitted as given", d["locations"] == locs, d.get("locations"))
+check("locations: maxDistance emitted", d["maxDistance"] == 150)
+check("locations: omitted when not given", "locations" not in pb.build_pass_json(style="generic", **BASE))
+raises("locations: max 10", lambda: pb.build_pass_json(style="generic", locations=[{"latitude": 0, "longitude": 0}] * 11, **BASE), "at most 10")
+raises("locations: latitude required", lambda: pb.build_pass_json(style="generic", locations=[{"longitude": 0}], **BASE), "needs a latitude")
+raises("locations: latitude in range", lambda: pb.build_pass_json(style="generic", locations=[{"latitude": 91, "longitude": 0}], **BASE), "between -90 and 90")
+raises("locations: longitude must be a number", lambda: pb.build_pass_json(style="generic", locations=[{"latitude": 1, "longitude": "72.8"}], **BASE), "must be a number")
+raises("locations: bool is not a number", lambda: pb.build_pass_json(style="generic", locations=[{"latitude": True, "longitude": 0}], **BASE), "must be a number")
+raises("locations: unknown key rejected", lambda: pb.build_pass_json(style="generic", locations=[{"lat": 1, "longitude": 0}], **BASE), "unknown keys")
+raises("locations: relevantText must be text", lambda: pb.build_pass_json(style="generic", locations=[{"latitude": 1, "longitude": 0, "relevantText": 5}], **BASE), "must be a string")
+raises("max_distance: needs locations", lambda: pb.build_pass_json(style="generic", max_distance=100, **BASE), "only applies with locations")
+raises("max_distance: positive", lambda: pb.build_pass_json(style="generic", locations=locs, max_distance=0, **BASE), "positive number")
+
 print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)
