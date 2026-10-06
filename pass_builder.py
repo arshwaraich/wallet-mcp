@@ -44,6 +44,10 @@ _BARCODE_MESSAGE_RULES = {
     "ITF": (re.compile(r"^(\d\d)+$"), "an even number of digits"),
 }
 
+# Lock-screen relevance by place (pass.json "locations"); Apple caps the list at 10.
+MAX_LOCATIONS = 10
+_LOCATION_KEYS = {"latitude", "longitude", "altitude", "relevantText"}
+
 # iOS 27 Featured Actions -- up to two tappable cards shown under the pass.
 # "place" is deliberately omitted: it needs an Apple Maps place ID rather than
 # a URL, and Apple's own pass-builder doesn't model that key yet.
@@ -157,6 +161,36 @@ def make_field(key: str | None, label: str | None, value, idx: int) -> dict:
     return d
 
 
+def _locations(raw: list[dict]) -> list[dict]:
+    if len(raw) > MAX_LOCATIONS:
+        raise PassBuildError(f"at most {MAX_LOCATIONS} locations allowed, got {len(raw)}")
+    out = []
+    for i, loc in enumerate(raw):
+        if not isinstance(loc, dict):
+            raise PassBuildError(f"locations[{i}] must be an object with latitude and longitude")
+        unknown = set(loc) - _LOCATION_KEYS
+        if unknown:
+            raise PassBuildError(f"locations[{i}] has unknown keys {sorted(unknown)}; allowed: {sorted(_LOCATION_KEYS)}")
+        entry = {}
+        for key, lo, hi in (("latitude", -90, 90), ("longitude", -180, 180), ("altitude", None, None)):
+            v = loc.get(key)
+            if v is None:
+                if key == "altitude":
+                    continue
+                raise PassBuildError(f"locations[{i}] needs a {key}")
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or (lo is not None and not lo <= v <= hi):
+                bounds = f" between {lo} and {hi}" if lo is not None else ""
+                raise PassBuildError(f"locations[{i}].{key} must be a number{bounds}, got {v!r}")
+            entry[key] = v
+        text = loc.get("relevantText")
+        if text is not None:
+            if not isinstance(text, str):
+                raise PassBuildError(f"locations[{i}].relevantText must be a string, got {text!r}")
+            entry["relevantText"] = text
+        out.append(entry)
+    return out
+
+
 def build_pass_json(
     *,
     style: str,
@@ -185,6 +219,8 @@ def build_pass_json(
     semantics: dict | None = None,
     semantic_layout: bool = False,
     info_links: dict | None = None,
+    locations: list[dict] | None = None,
+    max_distance: float | None = None,
 ) -> dict:
     if style not in STYLE_KEYS:
         raise PassBuildError(f"unknown style {style!r}, must be one of {sorted(STYLE_KEYS)}")
@@ -293,6 +329,15 @@ def build_pass_json(
             barcodes.append(b)
         # Only the iOS 9+ "barcodes" array; the deprecated single "barcode" key is left out.
         pass_dict["barcodes"] = barcodes
+
+    if locations:
+        pass_dict["locations"] = _locations(locations)
+    if max_distance is not None:
+        if not locations:
+            raise PassBuildError("max_distance only applies with locations")
+        if isinstance(max_distance, bool) or not isinstance(max_distance, (int, float)) or max_distance <= 0:
+            raise PassBuildError(f"max_distance must be a positive number of meters, got {max_distance!r}")
+        pass_dict["maxDistance"] = max_distance
 
     if featured_actions:
         if len(featured_actions) > MAX_FEATURED_ACTIONS:
