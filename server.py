@@ -1,7 +1,9 @@
 """wallet-mcp: an MCP server that signs Apple Wallet (.pkpass) passes on request.
 
-Single process serves three things on one port (proxied by nginx at /wallet-mcp/):
+Single process serves four things on one port (proxied by nginx):
   - the MCP endpoint itself (streamable-http, at /mcp)
+  - the same pass builder as a plain REST endpoint (POST /api/passes), for callers
+    that aren't MCP clients; it shares the rate limits and request log
   - a usage dashboard (/ and /api/stats)
   - short-lived download links for built .pkpass files (/download/{token})
 
@@ -11,6 +13,8 @@ shared signing service, not a per-caller cert. Free for now; a payment layer
 can be layered on top of the rate limiter later without changing the tool
 interface.
 """
+import inspect
+import json
 import logging
 import os
 import re
@@ -21,6 +25,7 @@ import traceback
 import uuid
 from pathlib import Path
 
+from pydantic import ConfigDict, ValidationError, create_model
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -220,17 +225,76 @@ async def create_wallet_pass(
 
     Returns a dict with download_url (valid for 1 hour), serial_number, and pass_type_identifier.
     """
+    params = {k: v for k, v in locals().items() if k != "ctx"}
     request = ctx.request_context.request
     ip = _client_ip(request) if request is not None else "stdio"
+    try:
+        return _create_pass(ip, "mcp", **params)
+    except PassRejected as e:
+        raise ToolError(e.message) from None
 
+
+class PassRejected(Exception):
+    """A caller-facing failure (rate limit or invalid input), shared by the MCP tool and REST API."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _create_pass(
+    ip: str,
+    source: str,
+    *,
+    style: str,
+    organization_name: str,
+    description: str,
+    logo_text: str | None = None,
+    transit_type: str | None = None,
+    barcode_message: str | None = None,
+    barcode_format: str | list[str] = "QR",
+    background_color: str | None = None,
+    foreground_color: str | None = None,
+    label_color: str | None = None,
+    relevant_date: str | None = None,
+    expiration_date: str | None = None,
+    voided: bool = False,
+    primary_fields: list[dict] | None = None,
+    secondary_fields: list[dict] | None = None,
+    auxiliary_fields: list[dict] | None = None,
+    header_fields: list[dict] | None = None,
+    back_fields: list[dict] | None = None,
+    serial_number: str | None = None,
+    icon_color: str = DEFAULT_ICON_COLOR,
+    icon_text: str | None = None,
+    logo_color: str | None = None,
+    icon_png_b64: str | None = None,
+    logo_png_b64: str | None = None,
+    generate_logo: bool = True,
+    poster: bool = False,
+    footer_fields: list[dict] | None = None,
+    background_png_b64: str | None = None,
+    featured_actions: list[dict] | None = None,
+    barcode_alt_text: str | None = None,
+    semantics: dict | None = None,
+    semantic_layout: bool = False,
+    info_links: dict | None = None,
+    primary_logo_png_b64: str | None = None,
+    secondary_logo_png_b64: str | None = None,
+    strip_png_b64: str | None = None,
+    thumbnail_png_b64: str | None = None,
+    artwork_png_b64: str | None = None,
+) -> dict:
+    """Rate-limit, build, sign and log one pass. `source` is "mcp" or "api", recorded in the log."""
     start = time.monotonic()
     rejection = db.check_rate_limit(ip)
     if rejection:
         db.log_request(
             ip=ip, style=style, organization_name=organization_name, success=False,
-            error=rejection, duration_ms=0, serial_number=None,
+            error=rejection, duration_ms=0, serial_number=None, source=source,
         )
-        raise ToolError(rejection)
+        raise PassRejected(rejection, 429)
 
     serial = serial_number or str(uuid.uuid4())
     try:
@@ -300,7 +364,7 @@ async def create_wallet_pass(
         duration_ms = int((time.monotonic() - start) * 1000)
         db.log_request(
             ip=ip, style=style, organization_name=organization_name, success=True,
-            error=None, duration_ms=duration_ms, serial_number=serial,
+            error=None, duration_ms=duration_ms, serial_number=serial, source=source,
         )
         return {
             "download_url": f"{PUBLIC_BASE_URL}/download/{token}",
@@ -312,15 +376,15 @@ async def create_wallet_pass(
         duration_ms = int((time.monotonic() - start) * 1000)
         db.log_request(
             ip=ip, style=style, organization_name=organization_name, success=False,
-            error=str(e), duration_ms=duration_ms, serial_number=serial,
+            error=str(e), duration_ms=duration_ms, serial_number=serial, source=source,
         )
-        raise ToolError(str(e)) from None
+        raise PassRejected(str(e), 400) from None
     except Exception as e:
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.error("unexpected error building pass: %s", traceback.format_exc())
         db.log_request(
             ip=ip, style=style, organization_name=organization_name, success=False,
-            error=f"internal error: {e}", duration_ms=duration_ms, serial_number=serial,
+            error=f"internal error: {e}", duration_ms=duration_ms, serial_number=serial, source=source,
         )
         raise
 
@@ -333,6 +397,43 @@ async def dashboard(request: Request) -> Response:
 @server.custom_route("/api/stats", methods=["GET"])
 async def api_stats(request: Request) -> Response:
     return JSONResponse(db.stats())
+
+
+# The REST body accepts exactly the tool's parameters, validated with the same
+# types, so the API and the MCP tool can't drift apart.
+_PassRequest = create_model(
+    "PassRequest",
+    __config__=ConfigDict(extra="forbid"),
+    **{
+        name: (param.annotation, ... if param.default is inspect.Parameter.empty else param.default)
+        for name, param in inspect.signature(_create_pass).parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY
+    },
+)
+
+
+@server.custom_route("/api/passes", methods=["POST"])
+async def api_create_pass(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    try:
+        params = _PassRequest.model_validate(body).model_dump()
+    except ValidationError as e:
+        details = [
+            f"{'.'.join(str(part) for part in err['loc']) or 'body'}: {err['msg']}"
+            for err in e.errors(include_url=False)
+        ]
+        return JSONResponse({"error": "invalid request", "details": details}, status_code=400)
+    try:
+        return JSONResponse(_create_pass(_client_ip(request), "api", **params))
+    except PassRejected as e:
+        return JSONResponse({"error": e.message}, status_code=e.status)
+    except Exception:
+        return JSONResponse({"error": "internal error building the pass"}, status_code=500)
 
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")

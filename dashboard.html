@@ -79,7 +79,7 @@ footer hr{border:none; border-top:1px solid var(--line); margin:0 0 14px}
   <section>
     <h2>Recent requests</h2>
     <table>
-      <thead><tr><th>Time (UTC)</th><th>IP</th><th>Style</th><th>Org</th><th>Result</th><th>ms</th></tr></thead>
+      <thead><tr><th>Time (UTC)</th><th>IP</th><th>Via</th><th>Style</th><th>Org</th><th>Result</th><th>ms</th></tr></thead>
       <tbody id="recent"></tbody>
     </table>
   </section>
@@ -117,12 +117,13 @@ async function load() {
     <tr>
       <td class="mono">${esc(r.ts.replace('T', ' '))}</td>
       <td class="mono">${esc(r.ip)}</td>
+      <td>${esc(r.source)}</td>
       <td>${esc(r.style)}</td>
       <td>${esc(r.organization_name)}</td>
       <td class="${r.success ? 'ok' : 'fail'}">${r.success ? 'ok' : esc(r.error || 'error')}</td>
       <td>${r.duration_ms ?? ''}</td>
     </tr>
-  `).join('') : '<tr><td colspan="6" class="empty">No requests yet.</td></tr>';
+  `).join('') : '<tr><td colspan="7" class="empty">No requests yet.</td></tr>';
 
   document.getElementById('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
