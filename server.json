@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.walletmcppass/wallet-mcp",
+  "title": "walletmcppass: Apple Wallet passes",
+  "description": "Create signed Apple Wallet passes (.pkpass): boarding passes, tickets, coupons, store cards. Free.",
+  "version": "1.0.0",
+  "websiteUrl": "https://walletmcppass.com",
+  "repository": {
+    "url": "https://github.com/arshwaraich/wallet-mcp",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://walletmcppass.com/mcp"
+    }
+  ]
+}

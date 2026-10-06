@@ -2,7 +2,20 @@
 
 An MCP server that signs [Apple Wallet](https://developer.apple.com/wallet/) (`.pkpass`) passes on request. Point any MCP client (Claude Desktop, Claude.ai custom connector, or anything else speaking Streamable HTTP MCP) at it and ask it to build a boarding pass, event ticket, coupon, store card, or generic pass — it comes back with a signed pass and a temporary download link. Not using an MCP client? The same thing is a plain REST endpoint, `POST /api/passes`.
 
-**Hosted instance:** [walletmcppass.com](https://walletmcppass.com) — MCP endpoint at `https://walletmcppass.com/mcp`, REST API at `https://walletmcppass.com/api/passes`, free during open beta.
+**Hosted instance:** [walletmcppass.com](https://walletmcppass.com)
+
+| | |
+|---|---|
+| MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
+| REST API | `POST https://walletmcppass.com/api/passes` |
+| Sign-in | None |
+| Price | Free |
+| Limits | 30 passes/day per IP, 500/day in total |
+| Pass types | boardingPass, eventTicket, coupon, storeCard, generic (+ iOS 27 poster) |
+
+Use it with Claude: [setup steps](https://walletmcppass.com/use-with-claude). Privacy policy: [walletmcppass.com/privacy](https://walletmcppass.com/privacy). It's an independent project, not affiliated with Apple; questions and bug reports go in [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+
+Boarding passes and tickets are built from the user's real airline- or venue-issued barcode data. The service doesn't issue tickets, check anyone in, or contact airlines.
 
 Free to call, rate-limited, with a small usage dashboard. No API key today; a payment layer is meant to slot in later without changing the tool's interface.
 
@@ -16,7 +29,7 @@ One process, one port, four things on it:
 
 - **The MCP endpoint** (Streamable HTTP) at `/mcp` — the `create_wallet_pass` tool.
 - **The REST API** at `POST /api/passes` — the same pass builder for non-MCP callers. It shares the rate limits and request log with the tool; each logged request records which one it came through (`source` = `mcp` or `api`).
-- **A usage dashboard** at `/` and `/api/stats` — request counts, success/error rate, recent activity, all read from a local SQLite log.
+- **A usage dashboard** at `/` and `/api/stats` — request counts, success/error rate, recent activity, all read from a local SQLite log. The hosted instance doesn't expose these publicly.
 - **Short-lived download links** at `/download/{token}` — built passes are served with the correct `application/vnd.apple.pkpass` content type (required for Wallet to recognize the file) and expire after 1 hour, swept by file mtime so a crash/restart can't leak files.
 
 ```
@@ -29,6 +42,8 @@ wallet-mcp.service   Example systemd unit (Restart=on-failure, boots enabled)
 ```
 
 ## The tool: `create_wallet_pass`
+
+Annotated with `title: "Create Apple Wallet pass"`, `readOnlyHint: false` and `destructiveHint: false`: it only ever creates a new pass file.
 
 ```
 style: "boardingPass" | "eventTicket" | "coupon" | "generic" | "storeCard"
@@ -127,6 +142,10 @@ No API key — anyone with the URL can call the tool or the REST API. Protected 
 - Apple's docs and Apple's own pass-builder code disagree on the semantic boarding pass time-zone keys: `departureLocationTimeZone` (docs) vs `departureAirportTimeZone` (code), same for destination. Both are accepted and emitted as given; send both.
 - Apple's Pass Builder validator flags a poster event ticket without NFC as an error, and the docs say the design isn't meant for barcode entry. NFC needs an Apple entitlement this deployment doesn't have, so those passes may show as classic event tickets.
 - Some barcodes (e.g. many airline boarding passes) are Aztec codes, not QR — visually similar but with one bullseye finder pattern instead of three corner squares. Match `barcode_format` to what you're actually encoding.
+
+## MCP Registry
+
+`server.json` describes the hosted instance for the [official MCP Registry](https://registry.modelcontextprotocol.io) as `com.walletmcppass/wallet-mcp`.
 
 ## Status
 

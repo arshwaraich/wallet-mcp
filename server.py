@@ -36,6 +36,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("wallet-mcp")
@@ -53,10 +54,13 @@ db.init()
 server = MCPServer(
     "wallet-mcp",
     instructions=(
-        "Signs Apple Wallet (.pkpass) passes and returns a temporary https download "
-        "link. Free, shared signing identity (pass.com.arshwaraich.vps) -- passes are "
-        "cosmetic/utility only, not airline- or venue-issued official passes. Rate "
-        "limited per caller; expect rejection if you exceed it."
+        "Creates signed Apple Wallet (.pkpass) passes -- boarding passes, event tickets, "
+        "coupons, store cards and generic passes -- and returns an https download link "
+        "valid for 1 hour. No account or API key; free; limited to 30 passes per day per "
+        "caller IP and 500 per day in total. Passes are signed with this service's own "
+        "certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this "
+        "service, not by an airline or venue. A pass's barcode only works where the "
+        "original one did if barcode_message is that original barcode's data."
     ),
 )
 
@@ -91,7 +95,16 @@ def _client_ip(request: Request) -> str:
 PUBLIC_BASE_URL = os.environ.get("WALLET_MCP_PUBLIC_URL", "https://vps.arshwaraich.com/wallet-mcp")
 
 
-@server.tool()
+@server.tool(
+    title="Create Apple Wallet pass",
+    annotations=ToolAnnotations(
+        title="Create Apple Wallet pass",
+        read_only_hint=False,
+        destructive_hint=False,  # only ever creates a new pass file; never changes or deletes anything
+        idempotent_hint=False,
+        open_world_hint=False,
+    ),
+)
 async def create_wallet_pass(
     ctx: Context,
     style: str,
@@ -133,7 +146,25 @@ async def create_wallet_pass(
     thumbnail_png_b64: str | None = None,
     artwork_png_b64: str | None = None,
 ) -> dict:
-    """Build and sign an Apple Wallet pass, returning a temporary download link.
+    """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
+
+    Builds one pass in one of the five Wallet styles -- boardingPass, eventTicket, coupon,
+    storeCard or generic -- from the text fields, colors, barcode and optional PNG images
+    given below, signs it with this service's Apple Pass Type ID certificate, and returns an
+    https download_url valid for 1 hour. Opening the link on an iPhone shows "Add to
+    Apple Wallet". Passes install on any iOS version; the iOS 26/27 layouts fall back to the
+    classic style on older iPhones.
+
+    Barcodes: QR, PDF417, Aztec and Code128 on every iOS version; Code39, Codabar, EAN13 and
+    ITF on iOS 27+. The barcode encodes exactly barcode_message. Gate and till scanners read
+    that data, so a copy of an existing boarding pass, ticket or loyalty card only scans if
+    barcode_message is the original barcode's content (airline boarding passes are usually
+    PDF417 or Aztec, holding an IATA BCBP string such as "M1DOE/JANE ..."). This tool does not issue
+    tickets, check anyone in, or contact airlines or venues.
+
+    Not supported: NFC passes, updating a pass after it is issued, Google Wallet.
+
+    Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}.
 
     Args:
         style: one of "boardingPass", "eventTicket", "coupon", "generic", "storeCard".
@@ -223,7 +254,6 @@ async def create_wallet_pass(
                 gradient in background_color is generated, since Wallet needs one of them.
             background_png_b64 is also used on eventTicket (blurred behind the classic ticket).
 
-    Returns a dict with download_url (valid for 1 hour), serial_number, and pass_type_identifier.
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
     request = ctx.request_context.request
