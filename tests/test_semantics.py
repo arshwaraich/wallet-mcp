@@ -92,7 +92,8 @@ server.db.check_rate_limit = lambda ip: None
 server.db.log_request = lambda **kw: None
 captured = {}
 server._register_download = lambda data: captured.setdefault("pkpass", data) and "tok"
-ctx = types.SimpleNamespace(request_context=types.SimpleNamespace(request=None))
+ctx = types.SimpleNamespace(request_context=types.SimpleNamespace(
+    request=None, meta=None, session=types.SimpleNamespace(client_params=None)))
 PNG = __import__("base64").b64encode(__import__("image_gen")._icon_png("#000000", "X", 10)).decode()
 
 
