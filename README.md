@@ -1,17 +1,18 @@
 # wallet-mcp: free Apple Wallet pass generator for Claude, ChatGPT and any MCP client
 
-Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wallet pass (`.pkpass`) from an AI assistant, with no Apple Developer account. wallet-mcp is the open-source server behind [walletmcppass.com](https://walletmcppass.com): an MCP server with one tool, `create_wallet_pass`, and the same pass builder as a REST API.
+Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wallet pass (`.pkpass`) from an AI assistant, with no Apple Developer account. wallet-mcp is the open-source server behind [walletmcppass.com](https://walletmcppass.com): an MCP server with two tools, `create_wallet_pass` and `update_wallet_pass`, and the same pass builder as a REST API.
 
 | | |
 |---|---|
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
-| REST API | `POST https://walletmcppass.com/api/passes` |
+| REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key |
 | Price | Free |
 | Limits | 30 passes a day per IP address, 500 a day in total |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
 | Output | A download link, valid for 1 hour, that opens "Add to Apple Wallet" on an iPhone |
+| Updates | Optional: `updatable=True` passes can be changed later, and installed copies refresh |
 
 ## Quick start
 
@@ -159,6 +160,31 @@ curl https://walletmcppass.com/api/passes \
 | 500 | `{"error": "internal error building the pass"}` |
 
 As with the tool, bodies that fail schema validation are rejected before the rate limiter and aren't logged; pass-builder errors are logged and do count.
+
+## Updating a pass: `update_wallet_pass` / `PATCH /api/passes/{serial}`
+
+Create the pass with `updatable=True`. The response adds an `edit_token`, a secret that is the only way to change that pass (no accounts; whoever holds the token owns the pass). The pass carries a `webServiceURL` (`{PUBLIC_BASE_URL}/passkit`) and its own `authenticationToken`, so every iPhone that adds it registers with the server.
+
+An update takes `serial_number`, `edit_token` and any of the create parameters. Given parameters replace the stored ones whole (a fields list replaces the list); omitted ones are kept. The server re-signs the pass, stores it, and sends an empty APNs push to each registered device. Wallet then fetches the new version. `voided=True` is how you cancel a pass. A field's `changeMessage` (for example `"You now have %@ points"`) shows on the lock screen when that field's value changes. Wallet matches fields by `key`, so give changing fields an explicit key.
+
+```sh
+curl -X PATCH https://walletmcppass.com/api/passes/$SERIAL \
+  -H "Authorization: Bearer $EDIT_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"primary_fields": [{"key": "points", "label": "Points", "value": "150", "changeMessage": "You now have %@ points"}]}'
+```
+
+It returns the create response plus `notified_devices` (pushes APNs accepted, not devices that have refreshed yet). The status codes are 200, 400, 401 (no bearer token), 404 (unknown serial or wrong token, deliberately the same) and 429. Updates count towards the same daily limits as creates.
+
+Notes:
+- Only updatable passes store their contents (in the `passes` table, with the edit token as a SHA-256 hash). Image URLs are fetched once and stored as PNG, so an update never refetches them.
+- The PassKit web service (`/passkit/v1/...`) implements Apple's protocol: register and unregister a device, list changed serials (`passesUpdatedSince` is the pass's integer `updated` time), fetch the latest pass (`If-Modified-Since` gives 304), and log. Each pass accepts up to 100 devices.
+- APNs uses the pass-signing certificate over HTTP/2 via `curl`, because the venv has no HTTP/2 client. `WALLET_MCP_APNS_URL` overrides the endpoint, and the tests use that to point it at a fake. A push that gets 400 or 410 removes that device's token.
+- nginx must forward `/passkit/` and `/api/passes/` to the backend, alongside `/mcp`, `/download/` and `= /api/passes`.
+- Tests: `tests/test_updates.py`.
+
+## Image URLs
+
+Every `*_png_b64` parameter also accepts an `https://` URL. `image_fetch.py` fetches it with SSRF guards: https only; every resolved address must be globally routable (so no loopback, private, link-local or CGNAT/tailnet addresses); the connection is pinned to the checked IP; redirects are re-checked (at most 3); and the limits are 5 MB, 25 megapixels and 10 s per read. JPEG, WebP, GIF and ICO are converted to PNG. Base64 input keeps its old rule, which is PNG only.
 
 ## Deploying your own instance
 

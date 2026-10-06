@@ -154,10 +154,14 @@ def build_pkpass(pass_dict: dict, files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def make_field(key: str | None, label: str | None, value, idx: int) -> dict:
+def make_field(key: str | None, label: str | None, value, idx: int, change_message: str | None = None) -> dict:
     d = {"key": key or f"field{idx}", "value": value}
     if label:
         d["label"] = label
+    if change_message is not None:
+        if not isinstance(change_message, str):
+            raise PassBuildError(f"changeMessage must be a string, got {change_message!r}")
+        d["changeMessage"] = change_message
     return d
 
 
@@ -221,6 +225,8 @@ def build_pass_json(
     info_links: dict | None = None,
     locations: list[dict] | None = None,
     max_distance: float | None = None,
+    web_service_url: str | None = None,
+    authentication_token: str | None = None,
 ) -> dict:
     if style not in STYLE_KEYS:
         raise PassBuildError(f"unknown style {style!r}, must be one of {sorted(STYLE_KEYS)}")
@@ -240,7 +246,8 @@ def build_pass_json(
         def fields(raw: list[dict] | None, section: str) -> list[dict]:
             out = []
             for i, f in enumerate(raw or []):
-                field = make_field(f.get("key") or f"{section}{i}", f.get("label"), f.get("value"), i)
+                field = make_field(f.get("key") or f"{section}{i}", f.get("label"), f.get("value"), i,
+                                   f.get("changeMessage"))
                 base, n = field["key"], 2
                 while field["key"] in seen:
                     field["key"] = f"{base}_{n}"
@@ -293,6 +300,10 @@ def build_pass_json(
         "description": description,
         style: style_body,
     }
+    if web_service_url:
+        # Updatable passes: Wallet registers with, and fetches new versions from, this service.
+        pass_dict["webServiceURL"] = web_service_url
+        pass_dict["authenticationToken"] = authentication_token
     if poster_body is not None:
         # Wallet on iOS 27+ prefers posterGeneric when present; older versions
         # ignore the unknown key and render the fallback style above.

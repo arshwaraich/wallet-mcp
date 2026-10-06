@@ -43,6 +43,35 @@ def init() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(requests)")}
         if "source" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN source TEXT NOT NULL DEFAULT 'mcp'")
+        # action = "create" or "update"; rows from before updates existed were all creates.
+        if "action" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN action TEXT NOT NULL DEFAULT 'create'")
+        # Updatable passes only (updatable=True). Unlike the request log, this keeps the
+        # pass's full contents, since an update rebuilds the pass from them.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS passes (
+                serial TEXT PRIMARY KEY,
+                auth_token TEXT NOT NULL,
+                edit_hash TEXT NOT NULL,
+                params TEXT NOT NULL,
+                pkpass BLOB NOT NULL,
+                created TEXT NOT NULL,
+                updated INTEGER NOT NULL
+            )
+            """
+        )
+        # Devices that installed an updatable pass, registered by Wallet itself.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS registrations (
+                device TEXT NOT NULL,
+                serial TEXT NOT NULL,
+                push_token TEXT NOT NULL,
+                PRIMARY KEY (device, serial)
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ip ON requests(ip)")
 
@@ -71,17 +100,101 @@ def check_rate_limit(ip: str) -> str | None:
 
 def log_request(
     *, ip: str, style: str, organization_name: str, success: bool,
-    error: str | None, duration_ms: int, serial_number: str | None, source: str,
+    error: str | None, duration_ms: int, serial_number: str | None, source: str, action: str = "create",
 ) -> None:
     with _lock, _conn() as conn:
         conn.execute(
-            """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number, source, action)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source,
+                ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source, action,
             ),
         )
+
+
+MAX_DEVICES_PER_PASS = 100
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def pass_exists(serial: str) -> bool:
+    with _lock, _conn() as conn:
+        return conn.execute("SELECT 1 FROM passes WHERE serial = ?", (serial,)).fetchone() is not None
+
+
+def store_pass(serial: str, auth_token: str, edit_hash: str, params: str, pkpass: bytes, updated: int) -> None:
+    with _lock, _conn() as conn:
+        conn.execute(
+            "INSERT INTO passes (serial, auth_token, edit_hash, params, pkpass, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (serial, auth_token, edit_hash, params, pkpass, _now(), updated),
+        )
+
+
+def get_pass(serial: str) -> sqlite3.Row | None:
+    with _lock, _conn() as conn:
+        return conn.execute("SELECT * FROM passes WHERE serial = ?", (serial,)).fetchone()
+
+
+def replace_pass(serial: str, params: str, pkpass: bytes, updated: int) -> None:
+    with _lock, _conn() as conn:
+        conn.execute(
+            "UPDATE passes SET params = ?, pkpass = ?, updated = ? WHERE serial = ?",
+            (params, pkpass, updated, serial),
+        )
+
+
+def register_device(device: str, serial: str, push_token: str) -> bool | None:
+    """True if newly registered, False if already was (token refreshed), None if the pass is full."""
+    with _lock, _conn() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM registrations WHERE device = ? AND serial = ?", (device, serial)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE registrations SET push_token = ? WHERE device = ? AND serial = ?",
+                (push_token, device, serial),
+            )
+            return False
+        (count,) = conn.execute("SELECT COUNT(*) FROM registrations WHERE serial = ?", (serial,)).fetchone()
+        if count >= MAX_DEVICES_PER_PASS:
+            return None
+        conn.execute(
+            "INSERT INTO registrations (device, serial, push_token) VALUES (?, ?, ?)",
+            (device, serial, push_token),
+        )
+        return True
+
+
+def unregister_device(device: str, serial: str) -> None:
+    with _lock, _conn() as conn:
+        conn.execute("DELETE FROM registrations WHERE device = ? AND serial = ?", (device, serial))
+
+
+def drop_push_tokens(serial: str, push_tokens: list[str]) -> None:
+    with _lock, _conn() as conn:
+        conn.executemany(
+            "DELETE FROM registrations WHERE serial = ? AND push_token = ?",
+            [(serial, t) for t in push_tokens],
+        )
+
+
+def push_tokens(serial: str) -> list[str]:
+    with _lock, _conn() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT push_token FROM registrations WHERE serial = ?", (serial,)
+        )]
+
+
+def device_serials(device: str, updated_since: int | None) -> list[sqlite3.Row]:
+    with _lock, _conn() as conn:
+        return conn.execute(
+            """SELECT p.serial, p.updated FROM registrations r JOIN passes p ON p.serial = r.serial
+               WHERE r.device = ? AND p.updated > ?""",
+            (device, updated_since or 0),
+        ).fetchall()
 
 
 def stats() -> dict:
