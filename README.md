@@ -1,23 +1,80 @@
-# wallet-mcp
+# wallet-mcp: free Apple Wallet pass generator for Claude, ChatGPT and any MCP client
 
-An MCP server that signs [Apple Wallet](https://developer.apple.com/wallet/) (`.pkpass`) passes on request. Point any MCP client (Claude Desktop, Claude.ai custom connector, or anything else speaking Streamable HTTP MCP) at it and ask it to build a boarding pass, event ticket, coupon, store card, or generic pass — it comes back with a signed pass and a temporary download link. Not using an MCP client? The same thing is a plain REST endpoint, `POST /api/passes`.
-
-**Hosted instance:** [walletmcppass.com](https://walletmcppass.com)
+Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wallet pass (`.pkpass`) from an AI assistant, with no Apple Developer account. wallet-mcp is the open-source server behind [walletmcppass.com](https://walletmcppass.com): an MCP server with one tool, `create_wallet_pass`, and the same pass builder as a REST API.
 
 | | |
 |---|---|
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes` |
-| Sign-in | None |
+| Sign-in | None. No account or API key |
 | Price | Free |
-| Limits | 30 passes/day per IP, 500/day in total |
-| Pass types | boardingPass, eventTicket, coupon, storeCard, generic (+ iOS 27 poster) |
+| Limits | 30 passes a day per IP address, 500 a day in total |
+| Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
+| Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
+| Output | A download link, valid for 1 hour, that opens "Add to Apple Wallet" on an iPhone |
 
-Use it with Claude: [setup steps](https://walletmcppass.com/use-with-claude). Privacy policy: [walletmcppass.com/privacy](https://walletmcppass.com/privacy). It's an independent project, not affiliated with Apple; questions and bug reports go in [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+## Quick start
 
-Boarding passes and tickets are built from the user's real airline- or venue-issued barcode data. The service doesn't issue tickets, check anyone in, or contact airlines.
+**Claude** (web, desktop and mobile; any plan, Free allows one custom connector): open **Customize → Connectors**, click **+ Add → Add custom connector**, name it `walletmcppass`, paste `https://walletmcppass.com/mcp`, choose **No sign in** and click **Add**. In a chat, click **+ → Connectors** and switch it on. [Full steps](https://walletmcppass.com/use-with-claude).
 
-Free to call, rate-limited, with a small usage dashboard. No API key today; a payment layer is meant to slot in later without changing the tool's interface.
+**ChatGPT**: go to [chatgpt.com/plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server**, name it `walletmcppass`, enter `https://walletmcppass.com/mcp` under **Connection**, set authentication to none and select **Create as a plugin**. In a chat, type `@` and pick walletmcppass. Availability depends on your plan and workspace settings. [Full steps](https://walletmcppass.com/use-with-chatgpt).
+
+**Codex**
+
+```sh
+codex mcp add walletmcppass --url https://walletmcppass.com/mcp
+```
+
+**Claude Code**
+
+```sh
+claude mcp add --transport http walletmcppass https://walletmcppass.com/mcp
+```
+
+**OpenAI Responses API**
+
+```python
+from openai import OpenAI
+
+client = OpenAI()
+response = client.responses.create(
+    model="gpt-6-astra",
+    tools=[{
+        "type": "mcp",
+        "server_label": "walletmcppass",
+        "server_description": "Creates signed Apple Wallet passes.",
+        "server_url": "https://walletmcppass.com/mcp",
+        "require_approval": "never",
+    }],
+    input="Make an Apple Wallet coupon for 20% off at Harbor Café, valid until 31 December, with the QR code CAFE20.",
+)
+print(response.output_text)
+```
+
+**Any other MCP client**: add a remote Streamable HTTP server at `https://walletmcppass.com/mcp`, with no headers. **No MCP client?** Use the [REST API](#the-rest-api-post-apipasses).
+
+Then ask for a pass:
+
+- "Make an Apple Wallet boarding pass from this PDF." (with the PDF attached)
+- "Turn my climbing gym card into a Wallet pass. Member number 004217, Code 128 barcode."
+- "Create an event ticket for Blue Note on Friday at 9pm, seat B12, with this QR code text: TICKET-0042."
+
+## PDF boarding pass to Apple Wallet
+
+Give your assistant the airline's PDF or a screenshot and it builds a Wallet boarding pass. **Boarding passes are built from your real airline-issued barcode**: the pass carries the same barcode data as your PDF (usually a PDF417 or Aztec code holding an IATA BCBP string), which is what security and gate scanners read. The service doesn't issue tickets, check you in or contact airlines, and the pass won't receive gate changes. Assistants read a PDF's printed text reliably but can't always decode the barcode image; if yours can't, scan it with a barcode scanner app and paste the text. [More](https://walletmcppass.com/pdf-boarding-pass-to-apple-wallet).
+
+## Compared with Create a Pass in iOS 27
+
+Wallet in iOS 27 can scan a card or fill in a Standard, Membership or Event template on the iPhone, which covers a single simple card. wallet-mcp adds:
+
+- boarding pass, coupon and store card layouts, Apple's iOS 26 semantic boarding pass and the iOS 27 poster layout;
+- passes built by an assistant or app from a PDF, an email or a sentence, instead of a form on the phone;
+- control over the barcode format (QR, PDF417, Aztec, Code 128 everywhere; Code 39, Codabar, EAN-13, ITF on iOS 27), colors, logo, images and back-of-pass text;
+- a signed `.pkpass` file you can share, or add on an iPhone that isn't running iOS 27.
+
+## Privacy, terms and support
+
+walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the [privacy policy](https://walletmcppass.com/privacy) lists exactly what is logged. [Terms of use](https://walletmcppass.com/terms). Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
 
 ## Why this exists
 
