@@ -61,7 +61,7 @@ Then ask for a pass:
 
 ## PDF boarding pass to Apple Wallet
 
-Give your assistant the airline's PDF or a screenshot and it builds a Wallet boarding pass. **Boarding passes are built from your real airline-issued barcode**: the pass carries the same barcode data as your PDF (usually a PDF417 or Aztec code holding an IATA BCBP string), which is what security and gate scanners read. The service doesn't issue tickets, check you in or contact airlines, and the pass won't receive gate changes. Assistants read a PDF's printed text reliably but can't always decode the barcode image; if yours can't, scan it with a barcode scanner app and paste the text. [More](https://walletmcppass.com/pdf-boarding-pass-to-apple-wallet).
+Give your assistant the airline's PDF or a screenshot and it builds a Wallet boarding pass. **Boarding passes are built from your real airline-issued barcode**: the pass carries the same barcode data as your PDF (usually a PDF417 or Aztec code holding an IATA BCBP string), which is what security and gate scanners read. The service doesn't issue tickets, check you in or contact airlines, and the pass won't receive gate changes. Assistants read a PDF's printed text reliably but can't always decode the barcode image; if yours can't, scan it with a barcode scanner app and paste the text.
 
 ## Compared with Create a Pass in iOS 27
 
@@ -74,7 +74,7 @@ Wallet in iOS 27 can scan a card or fill in a Standard, Membership or Event temp
 
 ## Privacy, terms and support
 
-walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the [privacy policy](https://walletmcppass.com/privacy) lists exactly what is logged. [Terms of use](https://walletmcppass.com/terms). Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name. Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
 
 ## Why this exists
 
@@ -199,10 +199,6 @@ No API key — anyone with the URL can call the tool or the REST API. Protected 
 - Apple's docs and Apple's own pass-builder code disagree on the semantic boarding pass time-zone keys: `departureLocationTimeZone` (docs) vs `departureAirportTimeZone` (code), same for destination. Both are accepted and emitted as given; send both.
 - Apple's Pass Builder validator flags a poster event ticket without NFC as an error, and the docs say the design isn't meant for barcode entry. NFC needs an Apple entitlement this deployment doesn't have, so those passes may show as classic event tickets.
 - Some barcodes (e.g. many airline boarding passes) are Aztec codes, not QR — visually similar but with one bullseye finder pattern instead of three corner squares. Match `barcode_format` to what you're actually encoding.
-
-## MCP Registry
-
-`server.json` describes the hosted instance for the [official MCP Registry](https://registry.modelcontextprotocol.io) as `com.walletmcppass/wallet-mcp`.
 
 ## Status
 
