@@ -72,12 +72,12 @@ server = MCPServer(
         "valid for 1 hour. No account or API key. Free for 30 passes (creates plus updates) per "
         "day per caller IP"
         + (
-            f"; past that, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
+            f"; past that (or the global cap), each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry with the payment in "
             '_meta["x402/payment"])'
             if payments.enabled else ""
         )
-        + "; at most 500 passes per day in total. Passes are signed with this service's own "
+        + "; free passes are also capped at 500 per day in total. Passes are signed with this service's own "
         "certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this "
         "service, not by an airline or venue. A pass's barcode only works where the "
         "original one did if barcode_message is that original barcode's data."
@@ -252,7 +252,8 @@ async def create_wallet_pass(
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus
     edit_token and updatable_until when updatable=True.
 
-    Free for 30 calls (creates plus updates) a day per caller IP. Past that, a call costs $0.01 in
+    Free for 30 calls (creates plus updates) a day per caller IP, and 500 a day across all callers.
+    Past either limit, a call costs $0.01 in
     USDC on Base, paid with x402; the refusal carries the payment requirements, and a paid result
     includes the payment receipt.
 
@@ -641,12 +642,12 @@ def _hash_token(token: str) -> str:
 
 
 def _check_rate_limit(caller: Caller, action: str, style: str, organization_name: str):
-    """Refuses a caller over a daily limit, unless they're past only the per-IP one and sent a
-    valid x402 payment. Returns that payment, verified but not yet charged, or None for a free call."""
+    """Refuses a caller over a daily limit unless they sent a valid x402 payment, which lifts both
+    limits. Returns that payment, verified but not yet charged, or None for a free call."""
     rejection = db.check_rate_limit(caller.ip)
     if rejection is None:
         return None
-    payable = payments.enabled and rejection == db.IP_LIMIT_ERROR
+    payable = payments.enabled
     if payable and caller.payment is not None:
         try:
             return payments.verify(caller.payment)
@@ -665,8 +666,8 @@ def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
         resource, how = f"mcp://tool/{action}_wallet_pass", 'the payment in _meta["x402/payment"]'
     else:
         resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
-    message = (f"{reason}. Past the free {db.PER_IP_DAILY_LIMIT} passes a day, each create or update "
-               f"costs {payments.PRICE} in USDC on Base via x402: retry this exact call with {how}.")
+    message = (f"{reason}. Past the free daily limits, each create or update costs {payments.PRICE} "
+               f"in USDC on Base via x402: retry this exact call with {how}.")
     try:
         return PassRejected(message, 402, payments.payment_required(resource, message))
     except Exception:

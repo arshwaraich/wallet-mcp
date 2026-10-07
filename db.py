@@ -15,7 +15,7 @@ _lock = threading.Lock()
 
 PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 30))
 GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
-# The per-IP refusal; past it a caller can pay per call (payments.py). The usage watcher matches both texts.
+# The per-IP refusal. Past either limit a caller can pay per call (payments.py). The usage watcher matches both texts.
 IP_LIMIT_ERROR = f"rate limit exceeded: max {PER_IP_DAILY_LIMIT} passes/day per caller"
 
 
@@ -103,7 +103,8 @@ def check_rate_limit(ip: str) -> str | None:
     today = _today_start()
     with _lock, _conn() as conn:
         (global_count,) = conn.execute(
-            "SELECT COUNT(*) FROM requests WHERE ts >= ?", (today,)
+            # Calls paid with x402 don't use up the free daily budget.
+            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NULL", (today,)
         ).fetchone()
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
