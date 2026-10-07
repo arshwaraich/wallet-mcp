@@ -20,6 +20,8 @@ from pass_builder import PassBuildError
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_PIXELS = 25_000_000
 MAX_REDIRECTS = 3
+# Only the formats the docs promise: Pillow can open ~40 more, and the rare decoders are its usual CVE surface.
+ALLOWED_FORMATS = ["PNG", "JPEG", "WEBP", "GIF", "ICO"]  # ICO: models often pass a site's favicon
 TIMEOUT_SECONDS = 10
 USER_AGENT = "wallet-mcp image fetch (+https://walletmcppass.com)"
 
@@ -55,6 +57,8 @@ def _download(url: str, field: str) -> bytes:
         if parts.scheme != "https" or not parts.hostname:
             raise PassBuildError(f"{field}: only https:// image URLs are accepted, got {url[:100]!r}")
         port = parts.port or 443
+        if port != 443:  # otherwise the fetcher doubles as a port scanner for other people's hosts
+            raise PassBuildError(f"{field}: image URLs must use the standard https port 443, got {port}")
         conn = _PinnedHTTPSConnection(parts.hostname, port, _public_address(parts.hostname, port, field))
         try:
             path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
@@ -85,7 +89,7 @@ def fetch_png(url: str, field: str) -> bytes:
     """Download an https image and return it as PNG bytes (JPEG, WebP, GIF etc. are converted)."""
     raw = _download(url, field)
     try:
-        with Image.open(io.BytesIO(raw)) as img:
+        with Image.open(io.BytesIO(raw), formats=ALLOWED_FORMATS) as img:
             if img.width * img.height > MAX_IMAGE_PIXELS:
                 raise PassBuildError(f"{field}: image is {img.width}x{img.height}, too large")
             if img.format == "PNG":

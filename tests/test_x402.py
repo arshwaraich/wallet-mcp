@@ -6,7 +6,7 @@ With --live, also sends a real signed payment from an unfunded wallet to the rea
 Base mainnet; it must come back refused for lack of funds (proving the wire format end to end,
 with nothing charged).
 Run: .venv/bin/python tests/test_x402.py [--live]"""
-import asyncio, base64, json, os, socket, sqlite3, subprocess, sys, tempfile, threading, time
+import asyncio, atexit, base64, json, os, shutil, socket, sqlite3, subprocess, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -70,14 +70,21 @@ class Facilitator(BaseHTTPRequestHandler):
             self._send({"success": False, "errorReason": "nonce_used", "transaction": "", "network": NETWORK})
 
 
+def downloads_dir(db_path: Path) -> Path:
+    """Per-run downloads dir on the real disk: /tmp is a small tmpfs here, which trips the low-disk guard."""
+    return Path("/var/tmp") / f"wallet-mcp-test-{db_path.parent.name}"
+
+
 def start_server(facilitator_url, ip_limit, global_limit=500, **extra_env):
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     db_path = Path(tempfile.mkdtemp()) / "test.db"
+    atexit.register(shutil.rmtree, downloads_dir(db_path), True)
     env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT=str(ip_limit),
                WALLET_MCP_GLOBAL_LIMIT=str(global_limit),
                WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}",
-               WALLET_MCP_X402_PAY_TO=PAY_TO, WALLET_MCP_X402_FACILITATOR=facilitator_url, **extra_env)
+               WALLET_MCP_X402_PAY_TO=PAY_TO, WALLET_MCP_X402_FACILITATOR=facilitator_url,
+               WALLET_MCP_DOWNLOADS=str(downloads_dir(db_path)), **extra_env)
     proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
@@ -183,6 +190,15 @@ def offline_tests():
         check("failed settlement leaves the stored pass unchanged", params["organization_name"] == "x402 Test", params)
         check("failed settlement logged as a failure", rows()[-1][:2] == ("update", 0) and "nonce_used" in rows()[-1][2],
               rows()[-1])
+        downloads = downloads_dir(db_path)
+        before = set(downloads.glob("*.pkpass"))
+        create = {**PASS, "updatable": True, "serial_number": "settle-fails"}
+        r = httpx.post(f"{base}/api/passes", json=create)
+        r = httpx.post(f"{base}/api/passes", json=create, headers={"payment-signature": header(sign(r.json()))})
+        with sqlite3.connect(db_path) as conn:
+            stored = conn.execute("SELECT 1 FROM passes WHERE serial = 'settle-fails'").fetchone()
+        check("failed settlement on create -> 402, no download file or stored pass left behind",
+              r.status_code == 402 and set(downloads.glob("*.pkpass")) == before and stored is None, r.text)
         mode["settle"] = True
 
         r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed"}, headers=auth)

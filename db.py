@@ -180,6 +180,12 @@ def store_pass(serial: str, auth_token: str, edit_hash: str, params: str, pkpass
         )
 
 
+def delete_pass(serial: str) -> None:
+    with _lock, _conn() as conn:
+        conn.execute("DELETE FROM registrations WHERE serial = ?", (serial,))
+        conn.execute("DELETE FROM passes WHERE serial = ?", (serial,))
+
+
 def get_pass(serial: str) -> sqlite3.Row | None:
     """A stored pass still inside its update window (expired ones count as gone before the sweep)."""
     with _lock, _conn() as conn:

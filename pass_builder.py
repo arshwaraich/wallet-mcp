@@ -112,9 +112,11 @@ def _hex_to_rgb_string(color: str) -> str:
 
 
 def sign_manifest(manifest_bytes: bytes) -> bytes:
+    # Server faults raise RuntimeError, not PassBuildError: callers get a generic internal error,
+    # and the paths and openssl output only reach the server log.
     for path, label in ((PASSKEY, "signing key"), (CERT, "signing cert"), (WWDR, "WWDR intermediate")):
         if not path.exists():
-            raise PassBuildError(f"missing {label} at {path}")
+            raise RuntimeError(f"missing {label} at {path}")
     result = subprocess.run(
         [
             "openssl", "smime", "-binary", "-sign",
@@ -128,7 +130,7 @@ def sign_manifest(manifest_bytes: bytes) -> bytes:
         check=False,
     )
     if result.returncode != 0:
-        raise PassBuildError(f"openssl signing failed: {result.stderr.decode(errors='replace')}")
+        raise RuntimeError(f"openssl signing failed: {result.stderr.decode(errors='replace')}")
     return result.stdout
 
 
