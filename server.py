@@ -76,15 +76,17 @@ server = MCPServer(
     instructions=(
         "Creates signed Apple Wallet (.pkpass) passes -- boarding passes, event tickets, "
         "coupons, store cards and generic passes -- and returns an https download link "
-        "valid for 1 hour. No account or API key. Free for 30 passes (creates plus updates) per "
-        "day per caller IP"
+        "valid for 1 hour. No account or API key. Pricing: a call is one create or one update. "
+        "Free for 30 calls a day per caller IP, while a shared pool of 500 free calls a day lasts; "
+        "every call counts towards the 30, including failed ones, and counts reset at 00:00 UTC"
         + (
-            f"; past that (or the global cap), each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
-            "refusal carries the payment requirements; retry with the payment in "
-            '_meta["x402/payment"])'
+            f". Past either limit, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
+            "refusal carries the payment requirements; retry the same call with the payment in "
+            '_meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
+            "build is never charged. Without x402, wait for the reset"
             if payments.enabled else ""
         )
-        + "; free passes are also capped at 500 per day in total. Passes are signed with this service's own "
+        + ". Passes are signed with this service's own "
         "certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this "
         "service, not by an airline or venue. A pass's barcode only works where the "
         "original one did if barcode_message is that original barcode's data."
@@ -259,10 +261,11 @@ async def create_wallet_pass(
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus
     edit_token and updatable_until when updatable=True.
 
-    Free for 30 calls (creates plus updates) a day per caller IP, and 500 a day across all callers.
-    Past either limit, a call costs $0.01 in
-    USDC on Base, paid with x402; the refusal carries the payment requirements, and a paid result
-    includes the payment receipt.
+    Pricing: a call is one create or one update. Free for 30 calls a day per caller IP, while a
+    shared pool of 500 free calls a day lasts; failed calls count too, and counts reset at 00:00 UTC.
+    Past either limit, a call costs $0.01 in USDC on Base, paid with x402; the refusal carries the
+    payment requirements, and a paid result includes the payment receipt. Payment is settled only
+    after the pass is built, so a failed build is never charged.
 
     Args:
         style: one of "boardingPass", "eventTicket", "coupon", "generic", "storeCard".
@@ -654,7 +657,7 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
     if shutil.disk_usage(DOWNLOAD_DIR).free < MIN_FREE_DISK_BYTES:
         logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
         _log(caller, style=style, organization_name=organization_name, success=False,
-             error="server is low on disk space", duration_ms=0, serial_number=None, action=action)
+             error="server is low on disk space", duration_ms=0, serial_number=None, action=action, refused=True)
         raise PassRejected("the service is temporarily out of capacity, try again later", 503)
     rejection = db.check_rate_limit(caller.ip)
     if rejection is None:
@@ -663,7 +666,7 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
     paid_rejection = db.check_paid_limit(caller.ip) if payable else None
     if paid_rejection:
         _log(caller, style=style, organization_name=organization_name, success=False,
-             error=paid_rejection, duration_ms=0, serial_number=None, action=action)
+             error=paid_rejection, duration_ms=0, serial_number=None, action=action, refused=True)
         raise PassRejected(paid_rejection, 429)
     if payable and caller.payment is not None:
         try:
@@ -672,7 +675,7 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
             rejection = str(e)
     _log(
         caller, style=style, organization_name=organization_name, success=False,
-        error=rejection, duration_ms=0, serial_number=None, action=action,
+        error=rejection, duration_ms=0, serial_number=None, action=action, refused=True,
     )
     raise _payment_required(caller, action, rejection) if payable else PassRejected(rejection, 429)
 

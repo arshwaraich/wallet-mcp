@@ -61,6 +61,9 @@ def init() -> None:
         # payment_tx = the on-chain transaction of a call paid for with x402 past the free limit.
         if "payment_tx" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN payment_tx TEXT")
+        # refused = 1 for a call turned away before any work (a limit, or a payment that failed to verify).
+        if "refused" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN refused INTEGER NOT NULL DEFAULT 0")
         # Updatable passes only (updatable=True). Unlike the request log, this keeps the
         # pass's full contents, since an update rebuilds the pass from them.
         conn.execute(
@@ -106,8 +109,9 @@ def check_rate_limit(ip: str) -> str | None:
     today = _today_start()
     with _lock, _conn() as conn:
         (global_count,) = conn.execute(
-            # Calls paid with x402 don't use up the free daily budget.
-            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NULL", (today,)
+            # Calls paid with x402 don't use up the free daily budget, and neither do refusals, so a
+            # caller retrying past its own limit can't run the shared pool dry for everyone else.
+            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NULL AND refused = 0", (today,)
         ).fetchone()
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
@@ -139,17 +143,17 @@ def check_paid_limit(ip: str) -> str | None:
 def log_request(
     *, ip: str, style: str, organization_name: str, success: bool,
     error: str | None, duration_ms: int, serial_number: str | None, source: str, action: str = "create",
-    client: str | None = None, x402: bool = False, payment_tx: str | None = None,
+    client: str | None = None, x402: bool = False, payment_tx: str | None = None, refused: bool = False,
 ) -> None:
     with _lock, _conn() as conn:
         conn.execute(
             """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number,
-                                     source, action, client, x402, payment_tx)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     source, action, client, x402, payment_tx, refused)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source, action,
-                client, 1 if x402 else 0, payment_tx,
+                client, 1 if x402 else 0, payment_tx, 1 if refused else 0,
             ),
         )
 
