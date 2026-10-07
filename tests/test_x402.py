@@ -234,8 +234,25 @@ def offline_tests():
                        if r.status_code == 402 else httpx.post(f"{base}/api/passes", json=PASS, headers=fresh).json()))})
         check("paid calls stay uncapped", r.status_code == 200, r.text)
         with sqlite3.connect(db_path) as conn:
-            free_today = conn.execute("SELECT COUNT(*) FROM requests WHERE payment_tx IS NULL").fetchone()[0]
-        check("paid calls aren't counted towards the free budget", free_today == 4, free_today)  # 2 free + 2 refusals
+            free_today = conn.execute(
+                "SELECT COUNT(*) FROM requests WHERE payment_tx IS NULL AND refused = 0").fetchone()[0]
+        check("paid calls and refusals aren't counted towards the free budget", free_today == 2, free_today)
+    finally:
+        proc.terminate()
+        proc.wait()
+
+    # Refusals don't drain the shared pool: one IP retrying past its own limit can't lock others out.
+    proc, base, db_path = start_server(f"http://127.0.0.1:{fac.server_port}", ip_limit=1, global_limit=3)
+    try:
+        hog = {"x-real-ip": "198.51.100.20"}
+        httpx.post(f"{base}/api/passes", json=PASS, headers=hog)
+        for _ in range(5):
+            httpx.post(f"{base}/api/passes", json=PASS, headers=hog)
+        r = httpx.post(f"{base}/api/passes", json=PASS, headers={"x-real-ip": "198.51.100.21"})
+        check("after 5 refused retries from one IP, another IP still gets a free call", r.status_code == 200, r.text)
+        with sqlite3.connect(db_path) as conn:
+            refused = conn.execute("SELECT COUNT(*) FROM requests WHERE refused = 1").fetchone()[0]
+        check("the retries are logged as refused", refused == 5, refused)
     finally:
         proc.terminate()
         proc.wait()
