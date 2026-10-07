@@ -11,6 +11,8 @@ ExecStart=/home/arsh/projects/wallet-mcp/.venv/bin/python /home/arsh/projects/wa
 Environment=PORT=8400
 Environment=WALLET_MCP_PUBLIC_URL=https://walletmcppass.com
 Environment=WALLET_MCP_PUBLIC_HOST=walletmcppass.com
+# x402 payouts past the free per-IP limit (payments.py); the key lives outside this sandbox.
+Environment=WALLET_MCP_X402_PAY_TO=0x093b665a7a45c1F907B91B52151Ce83b0534EFD1
 Restart=on-failure
 RestartSec=3
 

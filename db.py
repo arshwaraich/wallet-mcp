@@ -15,6 +15,8 @@ _lock = threading.Lock()
 
 PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 30))
 GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
+# The per-IP refusal; past it a caller can pay per call (payments.py). The usage watcher matches both texts.
+IP_LIMIT_ERROR = f"rate limit exceeded: max {PER_IP_DAILY_LIMIT} passes/day per caller"
 
 
 def _conn() -> sqlite3.Connection:
@@ -53,6 +55,9 @@ def init() -> None:
             conn.execute("ALTER TABLE requests ADD COLUMN client TEXT")
         if "x402" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN x402 INTEGER")
+        # payment_tx = the on-chain transaction of a call paid for with x402 past the free limit.
+        if "payment_tx" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN payment_tx TEXT")
         # Updatable passes only (updatable=True). Unlike the request log, this keeps the
         # pass's full contents, since an update rebuilds the pass from them.
         conn.execute(
@@ -106,24 +111,24 @@ def check_rate_limit(ip: str) -> str | None:
             "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ?", (today, ip)
         ).fetchone()
         if ip_count >= PER_IP_DAILY_LIMIT:
-            return f"rate limit exceeded: max {PER_IP_DAILY_LIMIT} passes/day per caller"
+            return IP_LIMIT_ERROR
     return None
 
 
 def log_request(
     *, ip: str, style: str, organization_name: str, success: bool,
     error: str | None, duration_ms: int, serial_number: str | None, source: str, action: str = "create",
-    client: str | None = None, x402: bool = False,
+    client: str | None = None, x402: bool = False, payment_tx: str | None = None,
 ) -> None:
     with _lock, _conn() as conn:
         conn.execute(
             """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number,
-                                     source, action, client, x402)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     source, action, client, x402, payment_tx)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source, action,
-                client, 1 if x402 else 0,
+                client, 1 if x402 else 0, payment_tx,
             ),
         )
 
