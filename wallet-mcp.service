@@ -14,6 +14,10 @@ Environment=WALLET_MCP_PUBLIC_HOST=walletmcppass.com
 # x402 payouts past the free per-IP limit (payments.py); the key lives outside this sandbox.
 Environment=WALLET_MCP_X402_PAY_TO=0x093b665a7a45c1F907B91B52151Ce83b0534EFD1
 Restart=on-failure
+# Backstop for the in-app capacity guards: a runaway build kills only this service, not the box.
+MemoryHigh=1G
+MemoryMax=1536M
+CPUQuota=200%
 RestartSec=3
 
 [Install]
