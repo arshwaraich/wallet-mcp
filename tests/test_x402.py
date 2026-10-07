@@ -70,11 +70,12 @@ class Facilitator(BaseHTTPRequestHandler):
             self._send({"success": False, "errorReason": "nonce_used", "transaction": "", "network": NETWORK})
 
 
-def start_server(facilitator_url, ip_limit):
+def start_server(facilitator_url, ip_limit, global_limit=500):
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     db_path = Path(tempfile.mkdtemp()) / "test.db"
     env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT=str(ip_limit),
+               WALLET_MCP_GLOBAL_LIMIT=str(global_limit),
                WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}",
                WALLET_MCP_X402_PAY_TO=PAY_TO, WALLET_MCP_X402_FACILITATOR=facilitator_url)
     proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
@@ -214,6 +215,27 @@ def offline_tests():
                                    meta={"x402/payment": sign(pr)}))
         check("MCP paid update -> ok", not res.is_error and res.structured_content["payment"]["transaction"] == "0xfeed",
               res)
+    finally:
+        proc.terminate()
+        proc.wait()
+
+    # Global cap: payment lifts it too, and paid calls don't use up the free budget.
+    proc, base, db_path = start_server(f"http://127.0.0.1:{fac.server_port}", ip_limit=100, global_limit=2)
+    try:
+        for ip in ("198.51.100.1", "198.51.100.2"):
+            httpx.post(f"{base}/api/passes", json=PASS, headers={"x-real-ip": ip})
+        fresh = {"x-real-ip": "198.51.100.3"}
+        r = httpx.post(f"{base}/api/passes", json=PASS, headers=fresh)
+        check("global cap reached -> 402 even for a fresh IP",
+              r.status_code == 402 and r.json()["error"].startswith("service is at its daily request limit"), r.text)
+        r = httpx.post(f"{base}/api/passes", json=PASS, headers={**fresh, "payment-signature": header(sign(r.json()))})
+        check("paid call goes through past the global cap", r.status_code == 200 and "payment" in r.json(), r.text)
+        r = httpx.post(f"{base}/api/passes", json=PASS, headers={**fresh, "payment-signature": header(sign(r.json()
+                       if r.status_code == 402 else httpx.post(f"{base}/api/passes", json=PASS, headers=fresh).json()))})
+        check("paid calls stay uncapped", r.status_code == 200, r.text)
+        with sqlite3.connect(db_path) as conn:
+            free_today = conn.execute("SELECT COUNT(*) FROM requests WHERE payment_tx IS NULL").fetchone()[0]
+        check("paid calls aren't counted towards the free budget", free_today == 4, free_today)  # 2 free + 2 refusals
     finally:
         proc.terminate()
         proc.wait()
