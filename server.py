@@ -11,9 +11,9 @@ Single process serves four things on one port (proxied by nginx):
 
 All passes are signed under the pass.com.arshwaraich.vps identity (see
 pass_builder.py / the apple-wallet-pass-toolkit memory) -- this is a free,
-shared signing service, not a per-caller cert. Free for now; a payment layer
-can be layered on top of the rate limiter later without changing the tool
-interface.
+shared signing service, not a per-caller cert. Free up to the per-IP daily
+limit; past it, a caller can pay per call with x402 (payments.py) instead of
+being refused, without any change to the tool interface.
 """
 import base64
 import datetime
@@ -28,7 +28,7 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
@@ -43,11 +43,12 @@ import db
 import image_fetch
 import image_gen
 import pass_builder
+import payments
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("wallet-mcp")
@@ -68,8 +69,15 @@ server = MCPServer(
     instructions=(
         "Creates signed Apple Wallet (.pkpass) passes -- boarding passes, event tickets, "
         "coupons, store cards and generic passes -- and returns an https download link "
-        "valid for 1 hour. No account or API key; free; limited to 30 passes per day per "
-        "caller IP and 500 per day in total. Passes are signed with this service's own "
+        "valid for 1 hour. No account or API key. Free for 30 passes (creates plus updates) per "
+        "day per caller IP"
+        + (
+            f"; past that, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
+            "refusal carries the payment requirements; retry with the payment in "
+            '_meta["x402/payment"])'
+            if payments.enabled else ""
+        )
+        + "; at most 500 passes per day in total. Passes are signed with this service's own "
         "certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this "
         "service, not by an airline or venue. A pass's barcode only works where the "
         "original one did if barcode_message is that original barcode's data."
@@ -117,12 +125,13 @@ X402_HEADERS = ("x-payment", "payment-signature")
 
 @dataclass(frozen=True)
 class Caller:
-    """Who made a request, as recorded in the log. Nothing is charged yet: x402 only notes whether
-    the caller sent a payment, to see which clients could pay before pricing goes live."""
+    """Who made a request, as recorded in the log. x402 notes whether the caller sent a payment;
+    it's only used (and charged) once the caller is past the free per-IP limit."""
     ip: str
     source: str  # "mcp" or "api"
     client: str | None = None  # MCP clientInfo "name/version", else the User-Agent
     x402: bool = False
+    payment: object = field(default=None, repr=False)  # the raw x402 payment, if one was sent
 
     @classmethod
     def from_mcp(cls, ctx: Context) -> "Caller":
@@ -133,11 +142,13 @@ class Caller:
             client = f"{params.client_info.name}/{params.client_info.version}"
         else:
             client = request.headers.get("user-agent") if request is not None else None
+        payment = (rctx.meta or {}).get(X402_META_KEY)
         return cls(
             ip=_client_ip(request) if request is not None else "stdio",
             source="mcp",
             client=client,
             x402=X402_META_KEY in (rctx.meta or {}),
+            payment=payment,
         )
 
     @classmethod
@@ -147,10 +158,12 @@ class Caller:
             source="api",
             client=request.headers.get("user-agent"),
             x402=any(h in request.headers for h in X402_HEADERS),
+            payment=next((request.headers[h] for h in X402_HEADERS if h in request.headers), None),
         )
 
 
 def _log(caller: Caller, **fields) -> None:
+    fields.setdefault("payment_tx", None)
     db.log_request(ip=caller.ip, source=caller.source, client=caller.client, x402=caller.x402, **fields)
 
 
@@ -238,6 +251,10 @@ async def create_wallet_pass(
 
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus
     edit_token and updatable_until when updatable=True.
+
+    Free for 30 calls (creates plus updates) a day per caller IP. Past that, a call costs $0.01 in
+    USDC on Base, paid with x402; the refusal carries the payment requirements, and a paid result
+    includes the payment receipt.
 
     Args:
         style: one of "boardingPass", "eventTicket", "coupon", "generic", "storeCard".
@@ -358,9 +375,9 @@ async def create_wallet_pass(
     params = {k: v for k, v in locals().items() if k != "ctx"}
     caller = Caller.from_mcp(ctx)
     try:
-        return await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params))
+        return _mcp_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params)))
     except PassRejected as e:
-        raise ToolError(e.message) from None
+        return _mcp_rejection(e)
 
 
 @server.tool(
@@ -438,18 +455,42 @@ async def update_wallet_pass(
     changes = {k: v for k, v in locals().items() if k not in ("ctx", "serial_number", "edit_token")}
     caller = Caller.from_mcp(ctx)
     try:
-        return await anyio.to_thread.run_sync(lambda: _update_pass(caller, serial_number, edit_token, changes))
+        return _mcp_result(await anyio.to_thread.run_sync(
+            lambda: _update_pass(caller, serial_number, edit_token, changes)))
     except PassRejected as e:
+        return _mcp_rejection(e)
+
+
+def _mcp_result(result: dict) -> dict | CallToolResult:
+    """A paid call also returns the x402 receipt in _meta, where x402 MCP clients look for it."""
+    if "payment" not in result:
+        return result
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(result, indent=2))],
+        structured_content=result,
+        meta={payments.MCP_RESPONSE_META_KEY: result["payment"]},
+    )
+
+
+def _mcp_rejection(e: "PassRejected") -> CallToolResult:
+    """x402's MCP transport: a tool error whose structured content is the PaymentRequired body."""
+    if e.payment_required is None:
         raise ToolError(e.message) from None
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(e.payment_required))],
+        structured_content=e.payment_required,
+        is_error=True,
+    )
 
 
 class PassRejected(Exception):
     """A caller-facing failure (rate limit or invalid input), shared by the MCP tool and REST API."""
 
-    def __init__(self, message: str, status: int):
+    def __init__(self, message: str, status: int, payment_required: dict | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.payment_required = payment_required  # x402 PaymentRequired body, for status 402
 
 
 def _create_pass(
@@ -501,7 +542,7 @@ def _create_pass(
     """Rate-limit, build, sign and log one pass."""
     params = {k: v for k, v in locals().items() if k not in ("caller", "serial_number", "updatable", "updatable_hours")}
     start = time.monotonic()
-    _check_rate_limit(caller, "create", style, organization_name)
+    paid = _check_rate_limit(caller, "create", style, organization_name)
 
     serial = serial_number or str(uuid.uuid4())
     try:
@@ -518,6 +559,7 @@ def _create_pass(
         params = _resolve_image_urls(params)
         auth_token = secrets.token_urlsafe(24) if updatable else None
         pkpass_bytes = _build_pkpass(params, serial, auth_token)
+        receipt = payments.settle(paid) if paid else None
         result = {
             "download_url": f"{PUBLIC_BASE_URL}/download/{_register_download(pkpass_bytes)}",
             "expires_in_seconds": DOWNLOAD_TTL_SECONDS,
@@ -531,12 +573,15 @@ def _create_pass(
                           int(time.time()), expires)
             result["edit_token"] = edit_token
             result["updatable_until"] = _iso(expires)
+        if receipt:
+            result["payment"] = receipt
     except Exception as e:
         _log_failure(e, caller, "create", style, organization_name, serial, start)
-        raise _rejection(e) from None
+        raise _rejection(e, caller, "create") from None
     _log(
         caller, style=style, organization_name=organization_name, success=True, error=None,
         duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial,
+        payment_tx=receipt and receipt.get("transaction"),
     )
     return result
 
@@ -555,10 +600,12 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         raise PassRejected("nothing to update: pass at least one field to change", 400)
     style = changes.get("style", params["style"])
     organization_name = changes.get("organization_name", params["organization_name"])
-    _check_rate_limit(caller, "update", style, organization_name)
+    paid = _check_rate_limit(caller, "update", style, organization_name)
     try:
         params.update(_resolve_image_urls(changes))
         pkpass_bytes = _build_pkpass(params, serial_number, row["auth_token"])
+        # Charged before the stored pass changes or any device is told, so a failed payment changes nothing.
+        receipt = payments.settle(paid) if paid else None
         # Wallet compares these as tags, so each version must sort after the last.
         updated = max(int(time.time()), row["updated"] + 1)
         db.replace_pass(serial_number, json.dumps(params), pkpass_bytes, updated)
@@ -566,12 +613,13 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         db.drop_push_tokens(serial_number, dead)
     except Exception as e:
         _log_failure(e, caller, "update", style, organization_name, serial_number, start)
-        raise _rejection(e) from None
+        raise _rejection(e, caller, "update") from None
     _log(
         caller, style=style, organization_name=organization_name, success=True, error=None,
         duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial_number, action="update",
+        payment_tx=receipt and receipt.get("transaction"),
     )
-    return {
+    result = {
         "download_url": f"{PUBLIC_BASE_URL}/download/{_register_download(pkpass_bytes)}",
         "expires_in_seconds": DOWNLOAD_TTL_SECONDS,
         "serial_number": serial_number,
@@ -579,6 +627,9 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         "notified_devices": notified,
         "updatable_until": _iso(row["expires"]),
     }
+    if receipt:
+        result["payment"] = receipt
+    return result
 
 
 def _iso(epoch: int) -> str:
@@ -589,18 +640,42 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _check_rate_limit(caller: Caller, action: str, style: str, organization_name: str) -> None:
+def _check_rate_limit(caller: Caller, action: str, style: str, organization_name: str):
+    """Refuses a caller over a daily limit, unless they're past only the per-IP one and sent a
+    valid x402 payment. Returns that payment, verified but not yet charged, or None for a free call."""
     rejection = db.check_rate_limit(caller.ip)
-    if rejection:
-        _log(
-            caller, style=style, organization_name=organization_name, success=False,
-            error=rejection, duration_ms=0, serial_number=None, action=action,
-        )
-        raise PassRejected(rejection, 429)
+    if rejection is None:
+        return None
+    payable = payments.enabled and rejection == db.IP_LIMIT_ERROR
+    if payable and caller.payment is not None:
+        try:
+            return payments.verify(caller.payment)
+        except payments.PaymentError as e:
+            rejection = str(e)
+    _log(
+        caller, style=style, organization_name=organization_name, success=False,
+        error=rejection, duration_ms=0, serial_number=None, action=action,
+    )
+    raise _payment_required(caller, action, rejection) if payable else PassRejected(rejection, 429)
+
+
+def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
+    """A 402 offering to do the call for a price; a plain 429 if the facilitator can't be reached."""
+    if caller.source == "mcp":
+        resource, how = f"mcp://tool/{action}_wallet_pass", 'the payment in _meta["x402/payment"]'
+    else:
+        resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
+    message = (f"{reason}. Past the free {db.PER_IP_DAILY_LIMIT} passes a day, each create or update "
+               f"costs {payments.PRICE} in USDC on Base via x402: retry this exact call with {how}.")
+    try:
+        return PassRejected(message, 402, payments.payment_required(resource, message))
+    except Exception:
+        logger.error("x402 payment requirements unavailable: %s", traceback.format_exc())
+        return PassRejected(reason, 429)
 
 
 def _log_failure(e: Exception, caller, action, style, organization_name, serial, start) -> None:
-    if isinstance(e, pass_builder.PassBuildError):
+    if isinstance(e, (pass_builder.PassBuildError, payments.PaymentError)):
         error = str(e)
     else:
         logger.error("unexpected error building pass: %s", traceback.format_exc())
@@ -611,7 +686,9 @@ def _log_failure(e: Exception, caller, action, style, organization_name, serial,
     )
 
 
-def _rejection(e: Exception) -> Exception:
+def _rejection(e: Exception, caller: Caller, action: str) -> Exception:
+    if isinstance(e, payments.PaymentError):
+        return _payment_required(caller, action, str(e))
     return PassRejected(str(e), 400) if isinstance(e, pass_builder.PassBuildError) else e
 
 
@@ -721,9 +798,9 @@ async def api_create_pass(request: Request) -> Response:
         return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
     try:
         caller = Caller.from_api(request)
-        return JSONResponse(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params)))
+        return _api_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params)))
     except PassRejected as e:
-        return JSONResponse({"error": e.message}, status_code=e.status)
+        return _api_rejection(e)
     except Exception:
         return JSONResponse({"error": "internal error building the pass"}, status_code=500)
 
@@ -758,12 +835,25 @@ async def api_update_pass(request: Request) -> Response:
         return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
     serial, caller = request.path_params["serial"], Caller.from_api(request)
     try:
-        return JSONResponse(await anyio.to_thread.run_sync(
+        return _api_result(await anyio.to_thread.run_sync(
             lambda: _update_pass(caller, serial, edit_token.strip(), changes)))
     except PassRejected as e:
-        return JSONResponse({"error": e.message}, status_code=e.status)
+        return _api_rejection(e)
     except Exception:
         return JSONResponse({"error": "internal error building the pass"}, status_code=500)
+
+
+def _api_result(result: dict) -> JSONResponse:
+    headers = {"PAYMENT-RESPONSE": payments.encode_header(result["payment"])} if "payment" in result else None
+    return JSONResponse(result, headers=headers)
+
+
+def _api_rejection(e: PassRejected) -> JSONResponse:
+    """x402's HTTP transport: a 402 with the PaymentRequired body, also base64'd in PAYMENT-REQUIRED."""
+    if e.payment_required is None:
+        return JSONResponse({"error": e.message}, status_code=e.status)
+    return JSONResponse(e.payment_required, status_code=402,
+                        headers={"PAYMENT-REQUIRED": payments.encode_header(e.payment_required)})
 
 
 def _validation_details(e: ValidationError) -> list[str]:

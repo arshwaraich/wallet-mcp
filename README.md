@@ -7,8 +7,8 @@ Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wal
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key |
-| Price | Free |
-| Limits | 30 passes a day per IP address, 500 a day in total |
+| Price | Free for 30 calls (creates + updates) a day per IP address; past that $0.01 per call in USDC on Base, paid with [x402](#paying-past-the-free-limit-x402) |
+| Limits | 500 a day in total |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
 | Output | A download link, valid for 1 hour, that opens "Add to Apple Wallet" on an iPhone |
@@ -156,7 +156,8 @@ curl https://walletmcppass.com/api/passes \
 |---|---|
 | 200 | Same as the tool: `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }` |
 | 400 | `{"error": "invalid request", "details": [...]}` for a malformed body or wrong types; `{"error": "..."}` when the pass itself is invalid |
-| 429 | `{"error": "rate limit exceeded: ..."}` — the same limit as MCP, counted across both |
+| 402 | Past the free per-IP limit: an x402 `PaymentRequired` body (also base64'd in the `PAYMENT-REQUIRED` header). Retry with a payment, see [below](#paying-past-the-free-limit-x402) |
+| 429 | `{"error": "service is at its daily request limit ..."}` — the global limit, which payment doesn't lift (or the per-IP limit, when payments are off) |
 | 500 | `{"error": "internal error building the pass"}` |
 
 As with the tool, bodies that fail schema validation are rejected before the rate limiter and aren't logged; pass-builder errors are logged and do count.
@@ -173,7 +174,7 @@ curl -X PATCH https://walletmcppass.com/api/passes/$SERIAL \
   -d '{"primary_fields": [{"key": "points", "label": "Points", "value": "150", "changeMessage": "You now have %@ points"}]}'
 ```
 
-It returns the create response plus `notified_devices` and `updatable_until` (pushes APNs accepted, not devices that have refreshed yet). The status codes are 200, 400, 401 (no bearer token), 404 (unknown serial, wrong token, or update window over, deliberately the same) and 429. Updates count towards the same daily limits as creates.
+It returns the create response plus `notified_devices` and `updatable_until` (pushes APNs accepted, not devices that have refreshed yet). The status codes are 200, 400, 401 (no bearer token), 402, 404 (unknown serial, wrong token, or update window over, deliberately the same) and 429. Updates count towards the same daily limits as creates.
 
 Notes:
 - Only updatable passes store their contents (in the `passes` table, with the edit token as a SHA-256 hash). The window is counted from creation and updates don't extend it. When it ends, the pass is treated as gone at once, and the download sweeper deletes the row and its device registrations within 30 seconds. Copies in Wallet keep their last version. Image URLs are fetched once and stored as PNG, so an update never refetches them.
@@ -195,7 +196,7 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 3. Set up the Python environment (this project has no `pip`/`venv` assumptions baked in beyond standard tooling):
    ```
    uv venv .venv
-   uv pip install --python .venv/bin/python "mcp[cli]" pillow uvicorn starlette
+   uv pip install --python .venv/bin/python "mcp[cli]" pillow uvicorn starlette "x402[evm,httpx]==2.25.0"
    ```
 4. Run it:
    ```
@@ -217,6 +218,24 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 ## Rate limiting
 
 No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 30 requests/day per caller IP, 500/day globally as a backstop, counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
+
+## Paying past the free limit: x402
+
+Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past the per-IP limit is offered the call for $0.01 in USDC instead of being refused. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
+
+- **MCP**: the refused call is a tool error whose `structuredContent` is an x402 v2 `PaymentRequired` (resource `mcp://tool/create_wallet_pass` or `update_wallet_pass`). The client retries the same call with the signed payment in `_meta["x402/payment"]`. The result then carries the receipt in `_meta["x402/payment-response"]` and as a `payment` key.
+- **REST**: a 402 with the `PaymentRequired` body and `PAYMENT-REQUIRED` header. The client retries with a `PAYMENT-SIGNATURE` (or legacy `X-PAYMENT`) header and gets the receipt in `PAYMENT-RESPONSE` and as `payment`.
+
+The facilitator verifies the payment before any work. It settles it on-chain after the pass is built but before the pass is handed over, stored or pushed. So a failed build is never charged, and a failed settlement (402 again) gets nothing and changes nothing. Payments sent while under the limit are ignored, not charged. Each settled call is logged with its `payment_tx`. The server never holds a key; the USDC goes straight to the payout address.
+
+| Env var | Default |
+|---|---|
+| `WALLET_MCP_X402_PAY_TO` | unset = payments off |
+| `WALLET_MCP_X402_FACILITATOR` | `https://facilitator.payai.network` (settles Base mainnet without an account) |
+| `WALLET_MCP_X402_NETWORK` | `eip155:8453` (Base mainnet) |
+| `WALLET_MCP_X402_PRICE` | `$0.01` |
+
+Coinbase's CDP facilitator also needs CDP API-key auth headers, which aren't wired in. `tests/test_x402.py` runs against a fake facilitator. `--live` also sends an unfunded payment to PayAI on mainnet, which must be refused for lack of balance.
 
 ## Gotchas worth knowing before you touch pass_builder.py or image_gen.py
 
