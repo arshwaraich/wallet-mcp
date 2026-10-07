@@ -70,14 +70,14 @@ class Facilitator(BaseHTTPRequestHandler):
             self._send({"success": False, "errorReason": "nonce_used", "transaction": "", "network": NETWORK})
 
 
-def start_server(facilitator_url, ip_limit, global_limit=500):
+def start_server(facilitator_url, ip_limit, global_limit=500, **extra_env):
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     db_path = Path(tempfile.mkdtemp()) / "test.db"
     env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT=str(ip_limit),
                WALLET_MCP_GLOBAL_LIMIT=str(global_limit),
                WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}",
-               WALLET_MCP_X402_PAY_TO=PAY_TO, WALLET_MCP_X402_FACILITATOR=facilitator_url)
+               WALLET_MCP_X402_PAY_TO=PAY_TO, WALLET_MCP_X402_FACILITATOR=facilitator_url, **extra_env)
     proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
@@ -242,6 +242,46 @@ def offline_tests():
         fac.shutdown()
 
 
+def capacity_tests():
+    fac = ThreadingHTTPServer(("127.0.0.1", 0), Facilitator)
+    threading.Thread(target=fac.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{fac.server_port}"
+    proc, base, _ = start_server(url, ip_limit=0, WALLET_MCP_PAID_IP_LIMIT="1", WALLET_MCP_PAID_GLOBAL_LIMIT="2")
+    try:
+        def paid(ip):
+            h = {"x-real-ip": ip}
+            r = httpx.post(f"{base}/api/passes", json=PASS, headers=h)
+            if r.status_code != 402:
+                return r
+            return httpx.post(f"{base}/api/passes", json=PASS, headers={**h, "payment-signature": header(sign(r.json()))})
+        check("first paid call ok", paid("198.51.100.10").status_code == 200)
+        r = paid("198.51.100.10")
+        check("paid per-IP cap -> 429, no payment offered",
+              r.status_code == 429 and "paid passes/day per caller" in r.json()["error"], r.text)
+        check("another IP can still pay", paid("198.51.100.11").status_code == 200)
+        r = paid("198.51.100.12")
+        check("paid global cap -> 429", r.status_code == 429 and "paid passes too" in r.json()["error"], r.text)
+    finally:
+        proc.terminate(); proc.wait()
+
+    proc, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MIN_FREE_DISK_GB="1000000")
+    try:
+        r = httpx.post(f"{base}/api/passes", json=PASS)
+        check("low disk -> 503", r.status_code == 503 and "capacity" in r.json()["error"], r.text)
+    finally:
+        proc.terminate(); proc.wait()
+
+    proc, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MAX_PASS_KB="1")
+    try:
+        r = httpx.post(f"{base}/api/passes", json=PASS)
+        check("oversized pass -> 400 naming the limit", r.status_code == 400 and "limit is" in r.json()["error"], r.text)
+        res = asyncio.run(mcp_call(base, "create_wallet_pass", PASS))
+        check("oversized pass over MCP -> tool error", res.is_error and "Use smaller images" in res.content[0].text, res)
+    finally:
+        proc.terminate(); proc.wait()
+        fac.shutdown()
+
+
 def live_test():
     proc, base, _ = start_server("https://facilitator.payai.network", ip_limit=0)
     try:
@@ -258,6 +298,7 @@ def live_test():
 
 
 offline_tests()
+capacity_tests()
 if "--live" in sys.argv:
     live_test()
 print("ALL PASSED" if not fails else f"{fails} FAILED")

@@ -15,6 +15,9 @@ _lock = threading.Lock()
 
 PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 30))
 GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
+# Paid calls aren't free-limited, but still capped so no one can exhaust the box's disk or CPU.
+PAID_PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_IP_LIMIT", 1000))
+PAID_GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_GLOBAL_LIMIT", 10000))
 # The per-IP refusal. Past either limit a caller can pay per call (payments.py). The usage watcher matches both texts.
 IP_LIMIT_ERROR = f"rate limit exceeded: max {PER_IP_DAILY_LIMIT} passes/day per caller"
 
@@ -113,6 +116,23 @@ def check_rate_limit(ip: str) -> str | None:
         ).fetchone()
         if ip_count >= PER_IP_DAILY_LIMIT:
             return IP_LIMIT_ERROR
+    return None
+
+
+def check_paid_limit(ip: str) -> str | None:
+    """Returns an error string if the caller can't buy another call today, else None."""
+    today = _today_start()
+    with _lock, _conn() as conn:
+        (global_count,) = conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NOT NULL", (today,)
+        ).fetchone()
+        if global_count >= PAID_GLOBAL_DAILY_LIMIT:
+            return "service is at its daily request limit for paid passes too, try again tomorrow"
+        (ip_count,) = conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND payment_tx IS NOT NULL", (today, ip)
+        ).fetchone()
+        if ip_count >= PAID_PER_IP_DAILY_LIMIT:
+            return f"rate limit exceeded: max {PAID_PER_IP_DAILY_LIMIT} paid passes/day per caller, on top of the free ones"
     return None
 
 

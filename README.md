@@ -8,7 +8,7 @@ Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wal
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key |
 | Price | Free for 30 calls (creates + updates) a day per IP address; past that $0.01 per call in USDC on Base, paid with [x402](#paying-past-the-free-limit-x402) |
-| Limits | 500 free calls a day in total; paid calls are uncapped |
+| Limits | 500 free calls a day in total; paid: 1,000 a day per IP, 10,000 in total; passes up to 10 MB |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
 | Output | A download link, valid for 1 hour, that opens "Add to Apple Wallet" on an iPhone |
@@ -221,7 +221,7 @@ No API key — anyone with the URL can call the tool or the REST API. Protected 
 
 ## Paying past the free limit: x402
 
-Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget and aren't capped. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
+Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
 
 - **MCP**: the refused call is a tool error whose `structuredContent` is an x402 v2 `PaymentRequired` (resource `mcp://tool/create_wallet_pass` or `update_wallet_pass`). The client retries the same call with the signed payment in `_meta["x402/payment"]`. The result then carries the receipt in `_meta["x402/payment-response"]` and as a `payment` key.
 - **REST**: a 402 with the `PaymentRequired` body and `PAYMENT-REQUIRED` header. The client retries with a `PAYMENT-SIGNATURE` (or legacy `X-PAYMENT`) header and gets the receipt in `PAYMENT-RESPONSE` and as `payment`.
@@ -236,6 +236,17 @@ The facilitator verifies the payment before any work. It settles it on-chain aft
 | `WALLET_MCP_X402_PRICE` | `$0.01` |
 
 Coinbase's CDP facilitator also needs CDP API-key auth headers, which aren't wired in. `tests/test_x402.py` runs against a fake facilitator. `--live` also sends an unfunded payment to PayAI on mainnet, which must be refused for lack of balance.
+
+## Capacity guards
+
+These stop any caller, paying or not, from taking the box down:
+
+- A built pass over 10 MB is refused with a 400 (`WALLET_MCP_MAX_PASS_KB`). Without images a pass is ~16 KB; the size comes from images.
+- Under 5 GB of free disk, every new create or update gets a 503 (`WALLET_MCP_MIN_FREE_DISK_GB`).
+- At most 4 builds run at once (`BUILD_LIMITER`), and the rest queue. Image decoding is the memory-heavy part.
+- systemd backstop in `wallet-mcp.service`: `MemoryHigh=1G`, `MemoryMax=1536M`, `CPUQuota=200%`. A runaway build gets this service OOM-killed and restarted, not the box.
+
+The usage watcher (a separate cron) emails when any of these trip, when systemd restarts the service, or when free disk drops under 10 GB.
 
 ## Gotchas worth knowing before you touch pass_builder.py or image_gen.py
 

@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import traceback
@@ -59,6 +60,12 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 DASHBOARD_HTML = (BASE_DIR / "dashboard.html").read_text()
 
 DOWNLOAD_TTL_SECONDS = 60 * 60  # 1 hour, matches fileshare.py's convention
+# Capacity guards, so no caller (paying or not) can take the box down. A pass is ~16 KB without
+# images; each image URL can be 25 megapixels, so builds are memory-heavy and run at most 4 at once
+# (the rest queue). systemd's MemoryMax/CPUQuota are the backstop.
+MAX_PKPASS_BYTES = int(os.environ.get("WALLET_MCP_MAX_PASS_KB", 10 * 1024)) * 1024
+MIN_FREE_DISK_BYTES = int(os.environ.get("WALLET_MCP_MIN_FREE_DISK_GB", 5)) * 1024 ** 3
+BUILD_LIMITER = anyio.CapacityLimiter(4)
 MAX_UPDATABLE_HOURS = 30 * 24  # updatable passes are stored for 1 hour by default, at most 30 days
 DEFAULT_ICON_COLOR = "#c98500"  # site accent color
 
@@ -376,7 +383,7 @@ async def create_wallet_pass(
     params = {k: v for k, v in locals().items() if k != "ctx"}
     caller = Caller.from_mcp(ctx)
     try:
-        return _mcp_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params)))
+        return _mcp_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _mcp_rejection(e)
 
@@ -457,7 +464,7 @@ async def update_wallet_pass(
     caller = Caller.from_mcp(ctx)
     try:
         return _mcp_result(await anyio.to_thread.run_sync(
-            lambda: _update_pass(caller, serial_number, edit_token, changes)))
+            lambda: _update_pass(caller, serial_number, edit_token, changes), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _mcp_rejection(e)
 
@@ -644,10 +651,20 @@ def _hash_token(token: str) -> str:
 def _check_rate_limit(caller: Caller, action: str, style: str, organization_name: str):
     """Refuses a caller over a daily limit unless they sent a valid x402 payment, which lifts both
     limits. Returns that payment, verified but not yet charged, or None for a free call."""
+    if shutil.disk_usage(DOWNLOAD_DIR).free < MIN_FREE_DISK_BYTES:
+        logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
+        _log(caller, style=style, organization_name=organization_name, success=False,
+             error="server is low on disk space", duration_ms=0, serial_number=None, action=action)
+        raise PassRejected("the service is temporarily out of capacity, try again later", 503)
     rejection = db.check_rate_limit(caller.ip)
     if rejection is None:
         return None
     payable = payments.enabled
+    paid_rejection = db.check_paid_limit(caller.ip) if payable else None
+    if paid_rejection:
+        _log(caller, style=style, organization_name=organization_name, success=False,
+             error=paid_rejection, duration_ms=0, serial_number=None, action=action)
+        raise PassRejected(paid_rejection, 429)
     if payable and caller.payment is not None:
         try:
             return payments.verify(caller.payment)
@@ -753,7 +770,12 @@ def _build_pkpass(params: dict, serial: str, auth_token: str | None) -> bytes:
         if p.get(param):
             files[f"{name}.png"] = image_gen.decode_b64_png(p[param], param)
 
-    return pass_builder.build_pkpass(pass_dict, files)
+    pkpass = pass_builder.build_pkpass(pass_dict, files)
+    if len(pkpass) > MAX_PKPASS_BYTES:
+        raise pass_builder.PassBuildError(
+            f"the pass is {len(pkpass) / 1024 ** 2:.2f} MB; the limit is {MAX_PKPASS_BYTES / 1024 ** 2:g} MB. "
+            "Use smaller images: Wallet shows them at most a few hundred pixels wide")
+    return pkpass
 
 
 _PASS_JSON_PARAMS = [
@@ -799,7 +821,7 @@ async def api_create_pass(request: Request) -> Response:
         return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
     try:
         caller = Caller.from_api(request)
-        return _api_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params)))
+        return _api_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _api_rejection(e)
     except Exception:
@@ -837,7 +859,7 @@ async def api_update_pass(request: Request) -> Response:
     serial, caller = request.path_params["serial"], Caller.from_api(request)
     try:
         return _api_result(await anyio.to_thread.run_sync(
-            lambda: _update_pass(caller, serial, edit_token.strip(), changes)))
+            lambda: _update_pass(caller, serial, edit_token.strip(), changes), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _api_rejection(e)
     except Exception:
