@@ -55,7 +55,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("wallet-mcp")
 
 BASE_DIR = Path(__file__).parent
-DOWNLOAD_DIR = BASE_DIR / "downloads"
+DOWNLOAD_DIR = Path(os.environ.get("WALLET_MCP_DOWNLOADS", BASE_DIR / "downloads"))  # tests use a temp dir
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 DASHBOARD_HTML = (BASE_DIR / "dashboard.html").read_text()
 
@@ -100,6 +100,10 @@ def _register_download(data: bytes) -> str:
     path = DOWNLOAD_DIR / f"{token}.pkpass"
     path.write_bytes(data)
     return token
+
+
+def _unregister_download(token: str) -> None:
+    (DOWNLOAD_DIR / f"{token}.pkpass").unlink(missing_ok=True)
 
 
 def _sweep_downloads() -> None:
@@ -570,9 +574,11 @@ def _create_pass(
         params = _resolve_image_urls(params)
         auth_token = secrets.token_urlsafe(24) if updatable else None
         pkpass_bytes = _build_pkpass(params, serial, auth_token)
-        receipt = payments.settle(paid) if paid else None
+        # Everything that can fail is written first and settled last, so a caller is never charged
+        # for a pass they don't get; a failed settlement undoes the writes.
+        token = _register_download(pkpass_bytes)
         result = {
-            "download_url": f"{PUBLIC_BASE_URL}/download/{_register_download(pkpass_bytes)}",
+            "download_url": f"{PUBLIC_BASE_URL}/download/{token}",
             "expires_in_seconds": DOWNLOAD_TTL_SECONDS,
             "serial_number": serial,
             "pass_type_identifier": pass_builder.PASS_TYPE_IDENTIFIER,
@@ -584,6 +590,13 @@ def _create_pass(
                           int(time.time()), expires)
             result["edit_token"] = edit_token
             result["updatable_until"] = _iso(expires)
+        try:
+            receipt = payments.settle(paid) if paid else None
+        except Exception:
+            _unregister_download(token)
+            if updatable:
+                db.delete_pass(serial)
+            raise
         if receipt:
             result["payment"] = receipt
     except Exception as e:
@@ -615,11 +628,18 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     try:
         params.update(_resolve_image_urls(changes))
         pkpass_bytes = _build_pkpass(params, serial_number, row["auth_token"])
-        # Charged before the stored pass changes or any device is told, so a failed payment changes nothing.
-        receipt = payments.settle(paid) if paid else None
+        token = _register_download(pkpass_bytes)
         # Wallet compares these as tags, so each version must sort after the last.
         updated = max(int(time.time()), row["updated"] + 1)
         db.replace_pass(serial_number, json.dumps(params), pkpass_bytes, updated)
+        # Settled after the writes (so a caller is never charged for an update that didn't happen)
+        # but before any device is told; a failed payment restores the stored pass.
+        try:
+            receipt = payments.settle(paid) if paid else None
+        except Exception:
+            _unregister_download(token)
+            db.replace_pass(serial_number, row["params"], row["pkpass"], row["updated"])
+            raise
         notified, dead = apns.push(db.push_tokens(serial_number))
         db.drop_push_tokens(serial_number, dead)
     except Exception as e:
@@ -631,7 +651,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         payment_tx=receipt and receipt.get("transaction"),
     )
     result = {
-        "download_url": f"{PUBLIC_BASE_URL}/download/{_register_download(pkpass_bytes)}",
+        "download_url": f"{PUBLIC_BASE_URL}/download/{token}",
         "expires_in_seconds": DOWNLOAD_TTL_SECONDS,
         "serial_number": serial_number,
         "pass_type_identifier": pass_builder.PASS_TYPE_IDENTIFIER,

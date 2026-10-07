@@ -144,11 +144,8 @@ def decode_b64_png(b64_data: str, field: str) -> bytes:
             "If it was cut off, resend the complete string."
         ) from None
     try:
-        with Image.open(io.BytesIO(raw)) as img:
-            fmt = img.format
+        with Image.open(io.BytesIO(raw), formats=["PNG"]) as img:
             img.verify()
     except Exception:
-        raise PassBuildError(f"{field} does not decode to a readable PNG image") from None
-    if fmt != "PNG":
-        raise PassBuildError(f"{field} is a {fmt} image; Wallet needs PNG")
+        raise PassBuildError(f"{field} does not decode to a readable PNG image (Wallet needs PNG)") from None
     return raw
