@@ -258,6 +258,10 @@ The usage watcher (a separate cron) emails when any of these trip, when systemd 
 - Apple's Pass Builder validator flags a poster event ticket without NFC as an error, and the docs say the design isn't meant for barcode entry. NFC needs an Apple entitlement this deployment doesn't have, so those passes may show as classic event tickets.
 - Some barcodes (e.g. many airline boarding passes) are Aztec codes, not QR — visually similar but with one bullseye finder pattern instead of three corner squares. Match `barcode_format` to what you're actually encoding.
 
+## MCP Registry
+
+`server.json` describes the hosted instance for the [official MCP Registry](https://registry.modelcontextprotocol.io) as `com.walletmcppass/wallet-mcp`.
+
 ## Status
 
 Live at [walletmcppass.com](https://walletmcppass.com). See `wallet-mcp.service` for the deployment shape it runs under.
