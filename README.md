@@ -75,7 +75,7 @@ Wallet in iOS 27 can scan a card or fill in a Standard, Membership or Event temp
 
 ## Privacy, terms and support
 
-walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus a contact email or x402 status if the caller chooses to send them. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
 
 ## Why this exists
 
@@ -220,6 +220,8 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 30 requests/day per caller IP, 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
 
 ## Paying past the free limit: x402
+
+Both tools and the REST API also take two optional inputs that are only logged, as `requests` columns: `contact_email` (an address the user wants to give the operator; a malformed one is a 400 that doesn't count as a call) and `x402_ready` (true/false, whether the client can pay with x402; separate from the `x402` column, which records whether a call actually sent a payment).
 
 Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
 
