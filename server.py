@@ -83,7 +83,7 @@ server = MCPServer(
             f". Past either limit, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
             '_meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
-            "build is never charged. Without x402, wait for the reset"
+            "build is never charged. Setup guide: https://walletmcppass.com/#x402. Without x402, wait for the reset"
             if payments.enabled else ""
         )
         + ". Passes are signed with this service's own "
@@ -134,6 +134,7 @@ def _client_ip(request: Request) -> str:
 # x402 payment carriers: the MCP transport's _meta key, and the HTTP headers of x402 v1 and v2.
 X402_META_KEY = "x402/payment"
 X402_HEADERS = ("x-payment", "payment-signature")
+X402_GUIDE_URL = "https://walletmcppass.com/#x402"
 
 
 @dataclass(frozen=True)
@@ -707,7 +708,7 @@ def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
     else:
         resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
     message = (f"{reason}. Past the free daily limits, each create or update costs {payments.PRICE} "
-               f"in USDC on Base via x402: retry this exact call with {how}.")
+               f"in USDC on Base via x402: retry this exact call with {how}. Setup guide: {X402_GUIDE_URL}")
     try:
         return PassRejected(message, 402, payments.payment_required(resource, message))
     except Exception:
