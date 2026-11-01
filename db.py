@@ -64,6 +64,12 @@ def init() -> None:
         # refused = 1 for a call turned away before any work (a limit, or a payment that failed to verify).
         if "refused" not in columns:
             conn.execute("ALTER TABLE requests ADD COLUMN refused INTEGER NOT NULL DEFAULT 0")
+        # contact_email and x402_ready = what the caller chose to tell us (x402_ready: 1, 0 or NULL for
+        # not said). Separate from x402, which records whether this call actually sent a payment.
+        if "contact_email" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN contact_email TEXT")
+        if "x402_ready" not in columns:
+            conn.execute("ALTER TABLE requests ADD COLUMN x402_ready INTEGER")
         # Updatable passes only (updatable=True). Unlike the request log, this keeps the
         # pass's full contents, since an update rebuilds the pass from them.
         conn.execute(
@@ -144,16 +150,18 @@ def log_request(
     *, ip: str, style: str, organization_name: str, success: bool,
     error: str | None, duration_ms: int, serial_number: str | None, source: str, action: str = "create",
     client: str | None = None, x402: bool = False, payment_tx: str | None = None, refused: bool = False,
+    contact_email: str | None = None, x402_ready: bool | None = None,
 ) -> None:
     with _lock, _conn() as conn:
         conn.execute(
             """INSERT INTO requests (ts, ip, style, organization_name, success, error, duration_ms, serial_number,
-                                     source, action, client, x402, payment_tx, refused)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     source, action, client, x402, payment_tx, refused, contact_email, x402_ready)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 ip, style, organization_name, 1 if success else 0, error, duration_ms, serial_number, source, action,
-                client, 1 if x402 else 0, payment_tx, 1 if refused else 0,
+                client, 1 if x402 else 0, payment_tx, 1 if refused else 0, contact_email,
+                None if x402_ready is None else int(x402_ready),
             ),
         )
 

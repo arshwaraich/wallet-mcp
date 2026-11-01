@@ -56,6 +56,43 @@ try:
         except httpx.HTTPError:
             time.sleep(0.1)
 
+    # --- optional contact_email and x402_ready ---
+    def info():
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute("SELECT contact_email, x402_ready FROM requests ORDER BY id DESC").fetchone()
+
+    def count():
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+
+    r = httpx.post(f"{base}/api/passes", json=PASS)
+    check("left out, both log as NULL", r.status_code == 200 and info() == (None, None), info())
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": "a@example.com", "x402_ready": True})
+    check("api create logs both", r.status_code == 200 and info() == ("a@example.com", 1), info())
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "x402_ready": False})
+    check("x402_ready=False logs 0", r.status_code == 200 and info() == (None, 0), info())
+    before = count()
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": "not an email"})
+    check("bad address -> 400, not logged as a call", r.status_code == 400 and count() == before, r.text)
+
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True, "contact_email": "b@example.com"})
+    made = r.json()
+    with sqlite3.connect(db_path) as conn:
+        stored = conn.execute("SELECT params FROM passes WHERE serial = ?", (made["serial_number"],)).fetchone()[0]
+    check("not stored with the pass", "b@example.com" not in stored and "x402_ready" not in stored, stored)
+    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json={"contact_email": "b@example.com"},
+                    headers={"authorization": f"Bearer {made['edit_token']}"})
+    check("an update with only these has nothing to change", r.status_code == 400, r.text)
+    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json={"description": "v2", "x402_ready": True},
+                    headers={"authorization": f"Bearer {made['edit_token']}"})
+    check("api update logs them", r.status_code == 200 and info() == (None, 1), r.text)
+    res = asyncio.run(mcp_call("create_wallet_pass", {**PASS, "contact_email": "c@example.com", "x402_ready": False}))
+    check("mcp create logs both", not res.is_error and info() == ("c@example.com", 0), info())
+    res = asyncio.run(mcp_call("update_wallet_pass", {"serial_number": made["serial_number"],
+                                                      "edit_token": made["edit_token"], "description": "v3",
+                                                      "contact_email": "d@example.com"}))
+    check("mcp update logs them", not res.is_error and info() == ("d@example.com", None), info())
+
     # --- REST ---
     r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True}, headers={"user-agent": "rest-agent/1"})
     check("api create ok", r.status_code == 200, r.text)
