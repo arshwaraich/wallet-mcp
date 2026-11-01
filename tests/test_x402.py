@@ -147,7 +147,8 @@ def offline_tests():
               body.get("x402Version") == 2 and body["accepts"][0]["amount"] == "10000"
               and body["accepts"][0]["payTo"] == PAY_TO and body["accepts"][0]["network"] == NETWORK, body)
         check("402 error says the limit and how to pay",
-              "rate limit exceeded" in body.get("error", "") and "PAYMENT-SIGNATURE" in body["error"], body)
+              "rate limit exceeded" in body.get("error", "") and "PAYMENT-SIGNATURE" in body["error"]
+              and "walletmcppass.com/#x402" in body["error"], body)
         check("PAYMENT-REQUIRED header matches the body", unheader(r.headers["payment-required"]) == body)
         check("the refusal is logged with the limit text the usage watcher matches",
               rows()[-1][:3] == ("create", 0, "rate limit exceeded: max 2 passes/day per caller"), rows()[-1])
