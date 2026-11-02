@@ -152,6 +152,15 @@ try:
     res = asyncio.run(mcp_call("create_wallet_pass", PASS, meta={"x402/payment": {"x402Version": 2}}))
     check("mcp create with x402/payment meta ok", not res.is_error, res)
     check("mcp x402/payment meta logs x402=1", last_row() == ("mcp", "create", "test-agent/9.9", 1, 1), last_row())
+
+    # --- dashboard stats ---
+    stats = httpx.get(f"{base}/api/stats").json()
+    info = stats["caller_info"]
+    contact = next((c for c in info["contacts"] if c["email"] == CALLER["contact_email"]), None)
+    check("stats list the contact email with its x402 answer", contact and contact["x402_ready"] == 0, info)
+    check("stats count refusals and that the caller got through",
+          info["refused_calls"] > 0 and info["refused_ips"] == info["refused_ips_through"] == 1, info)
+    check("recent rows carry both fields", {"contact_email", "x402_ready"} <= set(stats["recent"][0]), stats["recent"][0])
 finally:
     proc.terminate()
     proc.wait()
