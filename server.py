@@ -30,6 +30,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field, replace
+from typing import Literal
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
@@ -76,7 +77,8 @@ server = MCPServer(
     instructions=(
         "Creates signed Apple Wallet (.pkpass) passes -- boarding passes, event tickets, "
         "coupons, store cards and generic passes -- and returns an https download link "
-        "valid for 1 hour. No account or API key. Pricing: a call is one create or one update. "
+        "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
+        "x402_ready. Pricing: a call is one create or one update. "
         "Free for 30 calls a day per caller IP, while a shared pool of 500 free calls a day lasts; "
         "every call counts towards the 30, including failed ones, and counts reset at 00:00 UTC"
         + (
@@ -136,6 +138,11 @@ X402_META_KEY = "x402/payment"
 X402_HEADERS = ("x-payment", "payment-signature")
 X402_GUIDE_URL = "https://walletmcppass.com/#x402"
 EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+PLACEHOLDER_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "yourcompany.com"}  # the last is our docs
+PLACEHOLDER_EMAIL_TLDS = (".example", ".invalid", ".test", ".localhost")
+CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the user about it, and x402_ready shows "
+                   "how many clients could pay past the free limit. Both are only logged, and neither changes "
+                   "the pass, the price or the limits.")
 
 
 @dataclass(frozen=True)
@@ -203,8 +210,6 @@ async def create_wallet_pass(
     style: str,
     organization_name: str,
     description: str,
-    contact_email: str,
-    x402_ready: bool,
     logo_text: str | None = None,
     transit_type: str | None = None,
     barcode_message: str | None = None,
@@ -244,6 +249,8 @@ async def create_wallet_pass(
     max_distance: float | None = None,
     updatable: bool = False,
     updatable_hours: int = 1,
+    contact_email: str | None = None,
+    x402_ready: bool | Literal["unknown"] | None = None,
 ) -> dict:
     """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
 
@@ -392,11 +399,13 @@ async def create_wallet_pass(
             counted from creation; updates don't extend it. Afterwards the stored pass is deleted and
             can't be changed again, while copies in Wallet stay as they last were. Pick it to cover
             the pass's useful life, e.g. until a flight lands or an event ends. Only with updatable=True.
-        contact_email: required. The user's address for the operator of this service to contact them
-            about it. Ask the user for it; never take it from the pass details or make one up. It isn't
-            added to the pass, and it's kept in the request log.
-        x402_ready: required. True if this client can pay with x402, False if it can't or you don't
-            know. Only logged, to gauge x402 support: it changes neither price nor limits.
+        contact_email: required. The user's address, so the operator of this service can reach them
+            about it, for example if it changes or breaks for them. Ask the user for it; never take it
+            from the pass details or make one up. It isn't added to the pass, and it's kept in the
+            request log.
+        x402_ready: required. True if this client can pay with x402, False if it can't, "unknown" if
+            you don't know. It shows the operator how many clients could pay past the free limit.
+            Only logged: it changes neither price nor limits.
 
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
@@ -421,8 +430,6 @@ async def update_wallet_pass(
     ctx: Context,
     serial_number: str,
     edit_token: str,
-    contact_email: str,
-    x402_ready: bool,
     style: str | None = None,
     organization_name: str | None = None,
     description: str | None = None,
@@ -462,6 +469,8 @@ async def update_wallet_pass(
     artwork_png_b64: str | None = None,
     locations: list[dict] | None = None,
     max_distance: float | None = None,
+    contact_email: str | None = None,
+    x402_ready: bool | Literal["unknown"] | None = None,
 ) -> dict:
     """Change a pass made with create_wallet_pass(updatable=True); every iPhone that added it refreshes.
 
@@ -528,8 +537,6 @@ def _create_pass(
     style: str,
     organization_name: str,
     description: str,
-    contact_email: str,
-    x402_ready: bool,
     logo_text: str | None = None,
     transit_type: str | None = None,
     barcode_message: str | None = None,
@@ -569,12 +576,14 @@ def _create_pass(
     max_distance: float | None = None,
     updatable: bool = False,
     updatable_hours: int = 1,
+    contact_email: str | None = None,
+    x402_ready: bool | Literal["unknown"] | None = None,
 ) -> dict:
     """Rate-limit, build, sign and log one pass."""
     params = {k: v for k, v in locals().items()
               if k not in ("caller", "serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready")}
     start = time.monotonic()
-    caller = _with_caller_info(caller, contact_email, x402_ready)
+    caller = _with_caller_info(caller, contact_email, x402_ready, "create", style, organization_name)
     paid = _check_rate_limit(caller, "create", style, organization_name)
 
     serial = serial_number or str(uuid.uuid4())
@@ -628,12 +637,31 @@ def _create_pass(
     return result
 
 
-def _with_caller_info(caller: Caller, contact_email: str, x402_ready: bool) -> Caller:
-    """Adds the contact address and x402 status every call must send. A bad address is refused before the limits are checked,
-    so it neither counts as a call nor gets charged."""
-    if len(contact_email) > 254 or not EMAIL_RE.fullmatch(contact_email):
-        raise PassRejected("contact_email is not a valid email address", 400)
-    return replace(caller, contact_email=contact_email, x402_ready=x402_ready)
+def _with_caller_info(caller: Caller, contact_email: str | None, x402_ready: bool | str | None,
+                      action: str, style: str, organization_name: str) -> Caller:
+    """Adds the contact address and x402 status every call must send. A call without them is refused
+    before the limits are checked, so it neither counts as a call nor gets charged, but it is logged
+    so the operator can see who the requirement turns away."""
+    problems = []
+    if contact_email is None:
+        problems.append("contact_email is required")
+    elif len(contact_email) > 254 or not EMAIL_RE.fullmatch(contact_email):
+        problems.append("contact_email is not a valid email address")
+    elif _is_placeholder_email(contact_email):
+        problems.append("contact_email must be a real address, not a placeholder")
+    if x402_ready is None:
+        problems.append('x402_ready is required (true, false or "unknown")')
+    if problems:
+        _log(caller, style=style, organization_name=organization_name, success=False,
+             error=f"{db.CALLER_INFO_ERROR}: {'; '.join(problems)}", duration_ms=0, serial_number=None,
+             action=action, refused=True)
+        raise PassRejected(f"{'; '.join(problems)}. {CALLER_INFO_WHY}", 400)
+    return replace(caller, contact_email=contact_email, x402_ready=None if x402_ready == "unknown" else x402_ready)
+
+
+def _is_placeholder_email(address: str) -> bool:
+    domain = address.rpartition("@")[2].lower()
+    return domain in PLACEHOLDER_EMAIL_DOMAINS or domain.endswith(PLACEHOLDER_EMAIL_TLDS)
 
 
 def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: dict) -> dict:
@@ -644,13 +672,14 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         # One message for both cases, so serials can't be probed without their token.
         raise PassRejected(
             "unknown serial_number, wrong edit_token, or the pass's update window (updatable_hours) has ended", 404)
-    caller = _with_caller_info(caller, changes.pop("contact_email"), changes.pop("x402_ready"))
+    contact_email, x402_ready = changes.pop("contact_email"), changes.pop("x402_ready")
     params = json.loads(row["params"])
     changes = {k: v for k, v in changes.items() if v is not None}
     if not changes:
         raise PassRejected("nothing to update: pass at least one field to change", 400)
     style = changes.get("style", params["style"])
     organization_name = changes.get("organization_name", params["organization_name"])
+    caller = _with_caller_info(caller, contact_email, x402_ready, "update", style, organization_name)
     paid = _check_rate_limit(caller, "update", style, organization_name)
     try:
         params.update(_resolve_image_urls(changes))
@@ -832,6 +861,19 @@ _PASS_JSON_PARAMS = [
     name for name in inspect.signature(pass_builder.build_pass_json).parameters
     if name not in ("serial_number", "web_service_url", "authentication_token")
 ]
+
+
+def _advertise_caller_info_as_required() -> None:
+    """Clients see both as required, while the functions default them to None so a call without them
+    reaches _with_caller_info and gets logged instead of failing inside the MCP framework."""
+    for name in ("create_wallet_pass", "update_wallet_pass"):
+        schema = server._tool_manager.get_tool(name).parameters
+        schema["required"] = [*schema["required"], "contact_email", "x402_ready"]
+        schema["properties"]["contact_email"] = {"type": "string", "title": "Contact Email"}
+        schema["properties"]["x402_ready"] = {"enum": [True, False, "unknown"], "title": "X402 Ready"}
+
+
+_advertise_caller_info_as_required()
 
 
 @server.custom_route("/", methods=["GET"])

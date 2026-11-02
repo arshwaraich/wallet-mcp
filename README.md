@@ -6,7 +6,7 @@ Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wal
 |---|---|
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
-| Sign-in | None. No account or API key |
+| Sign-in | None. No account or API key, just a contact email on each call |
 | Price | Free for 30 calls (creates + updates) a day per IP address; past that $0.01 per call in USDC on Base, paid with [x402](#paying-past-the-free-limit-x402) |
 | Limits | 500 free calls a day in total; paid: 1,000 a day per IP, 10,000 in total; passes up to 10 MB |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
@@ -149,7 +149,7 @@ The JSON body takes exactly the tool's parameters above. The request model is ge
 curl https://walletmcppass.com/api/passes \
   -H 'Content-Type: application/json' \
   -d '{"style": "generic", "organization_name": "Harbor Climbing Gym", "description": "Day pass",
-       "contact_email": "you@example.com", "x402_ready": false,
+       "contact_email": "you@yourcompany.com", "x402_ready": false,
        "primary_fields": [{"label": "Guest", "value": "Ada L."}], "barcode_message": "DAY-0042"}'
 ```
 
@@ -172,7 +172,7 @@ An update takes `serial_number`, `edit_token` and any of the create parameters. 
 ```sh
 curl -X PATCH https://walletmcppass.com/api/passes/$SERIAL \
   -H "Authorization: Bearer $EDIT_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"contact_email": "you@example.com", "x402_ready": false,
+  -d '{"contact_email": "you@yourcompany.com", "x402_ready": false,
        "primary_fields": [{"key": "points", "label": "Points", "value": "150", "changeMessage": "You now have %@ points"}]}'
 ```
 
@@ -223,7 +223,7 @@ No API key — anyone with the URL can call the tool or the REST API. Protected 
 
 ## Paying past the free limit: x402
 
-Both tools and the REST API also require two inputs that are only logged, as `requests` columns: `contact_email` (the user's address for the operator; a missing or malformed one is a 400 that doesn't count as a call) and `x402_ready` (true/false, whether the client can pay with x402; separate from the `x402` column, which records whether a call actually sent a payment).
+Both tools and the REST API also require two inputs that are only logged, as `requests` columns: `contact_email` (the user's address, so the operator can reach them about the service; a missing, malformed or placeholder one is a 400 that is logged as refused but doesn't count as a call) and `x402_ready` (true, false or `"unknown"`, which shows how many clients could pay past the free limit; separate from the `x402` column, which records whether a call actually sent a payment).
 
 Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
 
