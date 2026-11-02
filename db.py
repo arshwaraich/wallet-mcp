@@ -110,6 +110,10 @@ def _today_start() -> str:
     return now.strftime("%Y-%m-%dT00:00:00")
 
 
+# Start of the logged error for a call refused over contact_email/x402_ready. Not counted as a call.
+CALLER_INFO_ERROR = "contact_email or x402_ready missing or invalid"
+
+
 def check_rate_limit(ip: str) -> str | None:
     """Returns an error string if the caller should be rejected, else None."""
     today = _today_start()
@@ -122,7 +126,8 @@ def check_rate_limit(ip: str) -> str | None:
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
         (ip_count,) = conn.execute(
-            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ?", (today, ip)
+            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND COALESCE(error, '') NOT LIKE ?",
+            (today, ip, CALLER_INFO_ERROR + "%"),
         ).fetchone()
         if ip_count >= PER_IP_DAILY_LIMIT:
             return IP_LIMIT_ERROR

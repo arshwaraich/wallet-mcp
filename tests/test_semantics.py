@@ -100,7 +100,7 @@ PNG = __import__("base64").b64encode(__import__("image_gen")._icon_png("#000000"
 def files_for(**kw):
     captured.clear()
     asyncio.run(server.create_wallet_pass(ctx, organization_name="Test Org", description="t",
-                                     contact_email="t@example.com", x402_ready=False, **kw))
+                                     contact_email="t@realco.dev", x402_ready=False, **kw))
     z = zipfile.ZipFile(io.BytesIO(captured["pkpass"]))
     return set(z.namelist()), json.loads(z.read("pass.json"))
 

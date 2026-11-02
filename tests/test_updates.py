@@ -71,7 +71,7 @@ try:
         except httpx.HTTPError:
             time.sleep(0.1)
 
-    PASS = {"style": "storeCard", "organization_name": "Bean Club", "description": "loyalty card", "contact_email": "t@example.com", "x402_ready": False,
+    PASS = {"style": "storeCard", "organization_name": "Bean Club", "description": "loyalty card", "contact_email": "t@realco.dev", "x402_ready": False,
             "primary_fields": [{"key": "points", "label": "Points", "value": "100",
                                 "changeMessage": "You now have %@ points"}],
             "secondary_fields": [{"label": "Member", "value": "Ada"}],
@@ -144,7 +144,7 @@ try:
 
     # --- updating over REST ---
     patch = lambda body, token=edit_token: httpx.patch(
-        f"{base}/api/passes/{serial}", json={"contact_email": "t@example.com", "x402_ready": False, **body}, headers={"Authorization": f"Bearer {token}"} if token else {})
+        f"{base}/api/passes/{serial}", json={"contact_email": "t@realco.dev", "x402_ready": False, **body}, headers={"Authorization": f"Bearer {token}"} if token else {})
     check("update: no token is 401", patch({"voided": True}, token=None).status_code == 401)
     r = patch({"voided": True}, token="wrong")
     check("update: wrong token is 404", r.status_code == 404, r.text)
@@ -180,9 +180,9 @@ try:
                 await session.initialize()
                 tools = {t.name: t for t in (await session.list_tools()).tools}
                 check("mcp: update tool listed", "update_wallet_pass" in tools, list(tools))
-                res = await session.call_tool("update_wallet_pass", {"serial_number": serial, "edit_token": edit_token, "voided": True, "contact_email": "t@example.com", "x402_ready": False})
+                res = await session.call_tool("update_wallet_pass", {"serial_number": serial, "edit_token": edit_token, "voided": True, "contact_email": "t@realco.dev", "x402_ready": False})
                 check("mcp: revoke via voided=True", not res.is_error, res.content)
-                res = await session.call_tool("update_wallet_pass", {"serial_number": serial, "edit_token": "nope", "voided": True, "contact_email": "t@example.com", "x402_ready": False})
+                res = await session.call_tool("update_wallet_pass", {"serial_number": serial, "edit_token": "nope", "voided": True, "contact_email": "t@realco.dev", "x402_ready": False})
                 check("mcp: wrong token is a visible error", res.is_error and "edit_token" in res.content[0].text, res.content)
     asyncio.run(mcp())
     check("revoked pass is voided", pass_json(httpx.get(latest, headers=ok_auth).content).get("voided") is True)

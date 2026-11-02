@@ -120,7 +120,7 @@ async def mcp_call(base, tool, args, meta=None):
             return await s.call_tool(tool, args, meta=meta)
 
 
-CALLER = {"contact_email": "t@example.com", "x402_ready": False}
+CALLER = {"contact_email": "t@realco.dev", "x402_ready": False}
 PASS = {"style": "generic", "organization_name": "x402 Test", "description": "test pass", **CALLER}
 
 
