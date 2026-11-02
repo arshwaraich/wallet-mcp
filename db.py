@@ -300,9 +300,27 @@ def stats() -> dict:
             (week_ago,),
         ).fetchall()
         recent = conn.execute(
-            """SELECT ts, ip, source, style, organization_name, success, error, duration_ms
+            """SELECT ts, ip, source, style, organization_name, success, error, duration_ms,
+                      contact_email, x402_ready
                FROM requests ORDER BY id DESC LIMIT 25"""
         ).fetchall()
+        # SQLite takes the bare x402_ready from the MAX(id) row, so this is each email's latest answer.
+        contacts = conn.execute(
+            """SELECT LOWER(contact_email) email, x402_ready, COUNT(*) calls, MAX(ts) last_ts, MAX(id) last_id
+               FROM requests WHERE contact_email IS NOT NULL
+               GROUP BY LOWER(contact_email) ORDER BY last_id DESC"""
+        ).fetchall()
+        caller_info_refused, = conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE error LIKE ?", (CALLER_INFO_ERROR + "%",)
+        ).fetchone()
+        # By IP, so a caller that rotates IPs can read as not having got through.
+        refused_ips, refused_ips_through = conn.execute(
+            """SELECT COUNT(*), COALESCE(SUM(EXISTS(
+                   SELECT 1 FROM requests s WHERE s.ip = f.ip AND s.success = 1 AND s.id > f.last_id
+               )), 0)
+               FROM (SELECT ip, MAX(id) last_id FROM requests WHERE error LIKE ? GROUP BY ip) f""",
+            (CALLER_INFO_ERROR + "%",),
+        ).fetchone()
         unique_ips_total, = conn.execute("SELECT COUNT(DISTINCT ip) FROM requests").fetchone()
 
     return {
@@ -315,4 +333,14 @@ def stats() -> dict:
         "by_source": [dict(r) for r in by_source],
         "by_day": [dict(r) for r in by_day],
         "recent": [dict(r) for r in recent],
+        "caller_info": {
+            "emails": len(contacts),
+            "x402_ready_yes": sum(c["x402_ready"] == 1 for c in contacts),
+            "x402_ready_no": sum(c["x402_ready"] == 0 for c in contacts),
+            "x402_ready_unknown": sum(c["x402_ready"] is None for c in contacts),
+            "refused_calls": caller_info_refused,
+            "refused_ips": refused_ips,
+            "refused_ips_through": refused_ips_through,
+            "contacts": [dict(c) for c in contacts[:100]],
+        },
     }

@@ -44,6 +44,7 @@ section h2{font-size:13px; text-transform:uppercase; letter-spacing:.05em; color
 .barrow .track > i{display:block; height:100%; background:var(--accent); border-radius:4px}
 .barrow .count{width:36px; text-align:right; color:var(--text-muted); font-variant-numeric:tabular-nums}
 
+.table-wrap{overflow-x:auto}
 table{width:100%; border-collapse:collapse; font-size:13px}
 th{text-align:left; color:var(--text-muted); font-weight:500; font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; padding:6px 10px; border-bottom:1px solid var(--line)}
 td{padding:7px 10px; border-bottom:1px solid var(--line); color:var(--text-secondary); font-variant-numeric:tabular-nums}
@@ -72,16 +73,29 @@ footer hr{border:none; border-top:1px solid var(--line); margin:0 0 14px}
   <section class="tiles" id="tiles"></section>
 
   <section>
+    <h2>Contact email &amp; x402 ready</h2>
+    <div class="tiles" id="caller-info-tiles"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Email</th><th>x402 ready</th><th>Calls</th><th>Last call (UTC)</th></tr></thead>
+        <tbody id="contacts"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
     <h2>Requests by pass style (all time)</h2>
     <div class="bars" id="by-style"></div>
   </section>
 
   <section>
     <h2>Recent requests</h2>
-    <table>
-      <thead><tr><th>Time (UTC)</th><th>IP</th><th>Via</th><th>Style</th><th>Org</th><th>Result</th><th>ms</th></tr></thead>
-      <tbody id="recent"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time (UTC)</th><th>IP</th><th>Via</th><th>Style</th><th>Org</th><th>Email</th><th>x402 ready</th><th>Result</th><th>ms</th></tr></thead>
+        <tbody id="recent"></tbody>
+      </table>
+    </div>
   </section>
 </main>
 
@@ -93,6 +107,8 @@ footer hr{border:none; border-top:1px solid var(--line); margin:0 0 14px}
 <script>
 function esc(s){ return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+function ready(v){ return v === 1 ? 'yes' : v === 0 ? 'no' : 'unknown'; }
+
 async function load() {
   const r = await fetch('api/stats');
   const d = await r.json();
@@ -103,6 +119,21 @@ async function load() {
     <div class="tile"><div class="label">All time</div><div class="value">${d.total}</div></div>
     <div class="tile"><div class="label">Unique callers</div><div class="value">${d.unique_ips_total}</div></div>
   `;
+
+  const ci = d.caller_info;
+  document.getElementById('caller-info-tiles').innerHTML = `
+    <div class="tile"><div class="label">Emails collected</div><div class="value">${ci.emails}</div></div>
+    <div class="tile"><div class="label">x402 ready</div><div class="value">${ci.x402_ready_yes}</div><div class="sub">${ci.x402_ready_no} no, ${ci.x402_ready_unknown} unknown</div></div>
+    <div class="tile"><div class="label">Refused for these fields</div><div class="value">${ci.refused_calls}</div><div class="sub">${ci.refused_ips_through} of ${ci.refused_ips} IPs got through after</div></div>
+  `;
+  document.getElementById('contacts').innerHTML = ci.contacts.length ? ci.contacts.map(c => `
+    <tr>
+      <td class="mono">${esc(c.email)}</td>
+      <td>${ready(c.x402_ready)}</td>
+      <td>${c.calls}</td>
+      <td class="mono">${esc(c.last_ts.replace('T', ' '))}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="4" class="empty">No emails yet.</td></tr>';
 
   const maxStyle = Math.max(1, ...d.by_style.map(s => s.c));
   document.getElementById('by-style').innerHTML = d.by_style.length ? d.by_style.map(s => `
@@ -120,10 +151,12 @@ async function load() {
       <td>${esc(r.source)}</td>
       <td>${esc(r.style)}</td>
       <td>${esc(r.organization_name)}</td>
+      <td class="mono">${esc(r.contact_email) || '—'}</td>
+      <td>${r.contact_email ? ready(r.x402_ready) : '—'}</td>
       <td class="${r.success ? 'ok' : 'fail'}">${r.success ? 'ok' : esc(r.error || 'error')}</td>
       <td>${r.duration_ms ?? ''}</td>
     </tr>
-  `).join('') : '<tr><td colspan="7" class="empty">No requests yet.</td></tr>';
+  `).join('') : '<tr><td colspan="9" class="empty">No requests yet.</td></tr>';
 
   document.getElementById('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
