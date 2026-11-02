@@ -47,7 +47,7 @@ try:
         except httpx.HTTPError:
             time.sleep(0.1)
 
-    PASS = {"style": "generic", "organization_name": "API Test", "description": "test",
+    PASS = {"style": "generic", "organization_name": "API Test", "description": "test", "contact_email": "t@example.com", "x402_ready": False,
             "primary_fields": [{"label": "Name", "value": "Ada"}]}
 
     # 1. a valid API call returns a working download link

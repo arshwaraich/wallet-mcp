@@ -75,7 +75,7 @@ Wallet in iOS 27 can scan a card or fill in a Standard, Membership or Event temp
 
 ## Privacy, terms and support
 
-walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus a contact email or x402 status if the caller chooses to send them. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus the contact email and x402 status every call must send. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
 
 ## Why this exists
 
@@ -149,6 +149,7 @@ The JSON body takes exactly the tool's parameters above. The request model is ge
 curl https://walletmcppass.com/api/passes \
   -H 'Content-Type: application/json' \
   -d '{"style": "generic", "organization_name": "Harbor Climbing Gym", "description": "Day pass",
+       "contact_email": "you@example.com", "x402_ready": false,
        "primary_fields": [{"label": "Guest", "value": "Ada L."}], "barcode_message": "DAY-0042"}'
 ```
 
@@ -171,7 +172,8 @@ An update takes `serial_number`, `edit_token` and any of the create parameters. 
 ```sh
 curl -X PATCH https://walletmcppass.com/api/passes/$SERIAL \
   -H "Authorization: Bearer $EDIT_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"primary_fields": [{"key": "points", "label": "Points", "value": "150", "changeMessage": "You now have %@ points"}]}'
+  -d '{"contact_email": "you@example.com", "x402_ready": false,
+       "primary_fields": [{"key": "points", "label": "Points", "value": "150", "changeMessage": "You now have %@ points"}]}'
 ```
 
 It returns the create response plus `notified_devices` and `updatable_until` (pushes APNs accepted, not devices that have refreshed yet). The status codes are 200, 400, 401 (no bearer token), 402, 404 (unknown serial, wrong token, or update window over, deliberately the same) and 429. Updates count towards the same daily limits as creates.
@@ -221,7 +223,7 @@ No API key — anyone with the URL can call the tool or the REST API. Protected 
 
 ## Paying past the free limit: x402
 
-Both tools and the REST API also take two optional inputs that are only logged, as `requests` columns: `contact_email` (an address the user wants to give the operator; a malformed one is a 400 that doesn't count as a call) and `x402_ready` (true/false, whether the client can pay with x402; separate from the `x402` column, which records whether a call actually sent a payment).
+Both tools and the REST API also require two inputs that are only logged, as `requests` columns: `contact_email` (the user's address for the operator; a missing or malformed one is a 400 that doesn't count as a call) and `x402_ready` (true/false, whether the client can pay with x402; separate from the `x402` column, which records whether a call actually sent a payment).
 
 Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
 

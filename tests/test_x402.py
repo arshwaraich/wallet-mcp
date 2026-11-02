@@ -120,7 +120,8 @@ async def mcp_call(base, tool, args, meta=None):
             return await s.call_tool(tool, args, meta=meta)
 
 
-PASS = {"style": "generic", "organization_name": "x402 Test", "description": "test pass"}
+CALLER = {"contact_email": "t@example.com", "x402_ready": False}
+PASS = {"style": "generic", "organization_name": "x402 Test", "description": "test pass", **CALLER}
 
 
 def offline_tests():
@@ -180,9 +181,9 @@ def offline_tests():
         # Settlement fails after the pass is built: no pass handed out, and an update changes nothing.
         mode["settle"] = False
         auth = {"authorization": f"Bearer {edit_token}"}
-        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed"}, headers=auth)
+        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed", **CALLER}, headers=auth)
         check("REST update past the limit -> 402", r.status_code == 402, r.text)
-        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed"},
+        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed", **CALLER},
                         headers={**auth, "payment-signature": header(sign(r.json()))})
         check("failed settlement -> 402, no pass", r.status_code == 402 and "download_url" not in r.json()
               and "nonce_used" in r.json()["error"] and "not charged" in r.json()["error"], r.text)
@@ -202,8 +203,8 @@ def offline_tests():
               r.status_code == 402 and set(downloads.glob("*.pkpass")) == before and stored is None, r.text)
         mode["settle"] = True
 
-        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed"}, headers=auth)
-        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed"},
+        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed", **CALLER}, headers=auth)
+        r = httpx.patch(f"{base}/api/passes/{serial}", json={"organization_name": "Changed", **CALLER},
                         headers={**auth, "payment-signature": header(sign(r.json()))})
         check("REST paid update -> 200", r.status_code == 200 and r.json()["payment"]["transaction"] == "0xfeed",
               r.text)
@@ -223,12 +224,12 @@ def offline_tests():
               (res.meta or {}).get("x402/payment-response", {}).get("transaction") == "0xfeed", res.meta)
 
         res = asyncio.run(mcp_call(base, "update_wallet_pass", {"serial_number": serial, "edit_token": edit_token,
-                                                                "organization_name": "Again"}))
+                                                                "organization_name": "Again", **CALLER}))
         pr = res.structured_content or {}
         check("MCP update past the limit -> PaymentRequired for update_wallet_pass",
               res.is_error and pr.get("resource", {}).get("url") == "mcp://tool/update_wallet_pass", res)
         res = asyncio.run(mcp_call(base, "update_wallet_pass", {"serial_number": serial, "edit_token": edit_token,
-                                                                "organization_name": "Again"},
+                                                                "organization_name": "Again", **CALLER},
                                    meta={"x402/payment": sign(pr)}))
         check("MCP paid update -> ok", not res.is_error and res.structured_content["payment"]["transaction"] == "0xfeed",
               res)

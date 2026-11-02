@@ -147,8 +147,8 @@ class Caller:
     client: str | None = None  # MCP clientInfo "name/version", else the User-Agent
     x402: bool = False
     payment: object = field(default=None, repr=False)  # the raw x402 payment, if one was sent
-    contact_email: str | None = None  # optional, from the caller
-    x402_ready: bool | None = None  # optional, from the caller
+    contact_email: str | None = None  # from the caller
+    x402_ready: bool | None = None  # from the caller
 
     @classmethod
     def from_mcp(cls, ctx: Context) -> "Caller":
@@ -203,6 +203,8 @@ async def create_wallet_pass(
     style: str,
     organization_name: str,
     description: str,
+    contact_email: str,
+    x402_ready: bool,
     logo_text: str | None = None,
     transit_type: str | None = None,
     barcode_message: str | None = None,
@@ -242,8 +244,6 @@ async def create_wallet_pass(
     max_distance: float | None = None,
     updatable: bool = False,
     updatable_hours: int = 1,
-    contact_email: str | None = None,
-    x402_ready: bool | None = None,
 ) -> dict:
     """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
 
@@ -392,11 +392,11 @@ async def create_wallet_pass(
             counted from creation; updates don't extend it. Afterwards the stored pass is deleted and
             can't be changed again, while copies in Wallet stay as they last were. Pick it to cover
             the pass's useful life, e.g. until a flight lands or an event ends. Only with updatable=True.
-        contact_email: optional address the user wants to give the operator of this service, to be
-            contacted about it. Only send one the user gave for this purpose, never one taken from the
-            pass details. It isn't added to the pass, and it's kept in the request log.
-        x402_ready: optional. True if this client can pay with x402, False if it can't; leave it out
-            if you don't know. Only logged, to gauge x402 support: it changes neither price nor limits.
+        contact_email: required. The user's address for the operator of this service to contact them
+            about it. Ask the user for it; never take it from the pass details or make one up. It isn't
+            added to the pass, and it's kept in the request log.
+        x402_ready: required. True if this client can pay with x402, False if it can't or you don't
+            know. Only logged, to gauge x402 support: it changes neither price nor limits.
 
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
@@ -421,6 +421,8 @@ async def update_wallet_pass(
     ctx: Context,
     serial_number: str,
     edit_token: str,
+    contact_email: str,
+    x402_ready: bool,
     style: str | None = None,
     organization_name: str | None = None,
     description: str | None = None,
@@ -460,13 +462,11 @@ async def update_wallet_pass(
     artwork_png_b64: str | None = None,
     locations: list[dict] | None = None,
     max_distance: float | None = None,
-    contact_email: str | None = None,
-    x402_ready: bool | None = None,
 ) -> dict:
     """Change a pass made with create_wallet_pass(updatable=True); every iPhone that added it refreshes.
 
-    Takes the serial_number and edit_token returned when the pass was created, plus any of
-    create_wallet_pass's parameters, with the same meanings. Each parameter given replaces the
+    Takes the serial_number and edit_token returned when the pass was created, the required
+    contact_email and x402_ready, plus any of create_wallet_pass's parameters, with the same meanings. Each parameter given replaces the
     stored value completely (a fields list replaces the whole list, so resend unchanged fields
     too); parameters left out keep their current values. Clear a text value with "" and a list
     with []. To cancel a pass, set voided=True: Wallet marks it void on every iPhone.
@@ -528,6 +528,8 @@ def _create_pass(
     style: str,
     organization_name: str,
     description: str,
+    contact_email: str,
+    x402_ready: bool,
     logo_text: str | None = None,
     transit_type: str | None = None,
     barcode_message: str | None = None,
@@ -567,8 +569,6 @@ def _create_pass(
     max_distance: float | None = None,
     updatable: bool = False,
     updatable_hours: int = 1,
-    contact_email: str | None = None,
-    x402_ready: bool | None = None,
 ) -> dict:
     """Rate-limit, build, sign and log one pass."""
     params = {k: v for k, v in locals().items()
@@ -628,11 +628,11 @@ def _create_pass(
     return result
 
 
-def _with_caller_info(caller: Caller, contact_email: str | None, x402_ready: bool | None) -> Caller:
-    """Adds what the caller chose to tell us. A bad address is refused before the limits are checked,
+def _with_caller_info(caller: Caller, contact_email: str, x402_ready: bool) -> Caller:
+    """Adds the contact address and x402 status every call must send. A bad address is refused before the limits are checked,
     so it neither counts as a call nor gets charged."""
-    if contact_email is not None and (len(contact_email) > 254 or not EMAIL_RE.fullmatch(contact_email)):
-        raise PassRejected("contact_email is not a valid email address; fix it or leave it out", 400)
+    if len(contact_email) > 254 or not EMAIL_RE.fullmatch(contact_email):
+        raise PassRejected("contact_email is not a valid email address", 400)
     return replace(caller, contact_email=contact_email, x402_ready=x402_ready)
 
 
@@ -644,7 +644,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         # One message for both cases, so serials can't be probed without their token.
         raise PassRejected(
             "unknown serial_number, wrong edit_token, or the pass's update window (updatable_hours) has ended", 404)
-    caller = _with_caller_info(caller, changes.pop("contact_email", None), changes.pop("x402_ready", None))
+    caller = _with_caller_info(caller, changes.pop("contact_email"), changes.pop("x402_ready"))
     params = json.loads(row["params"])
     changes = {k: v for k, v in changes.items() if v is not None}
     if not changes:
@@ -882,7 +882,7 @@ _UpdateRequest = create_model(
     "UpdateRequest",
     __config__=ConfigDict(extra="forbid"),
     **{
-        name: (param.annotation, None)
+        name: (param.annotation, ... if param.default is inspect.Parameter.empty else None)
         for name, param in inspect.signature(update_wallet_pass).parameters.items()
         if name not in ("ctx", "serial_number", "edit_token")
     },
