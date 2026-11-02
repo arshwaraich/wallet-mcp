@@ -33,7 +33,8 @@ env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP
            WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}")
 proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-PASS = {"style": "generic", "organization_name": "Caller Test", "description": "test pass"}
+CALLER = {"contact_email": "caller@example.com", "x402_ready": False}
+PASS = {"style": "generic", "organization_name": "Caller Test", "description": "test pass", **CALLER}
 
 
 def last_row():
@@ -65,33 +66,43 @@ try:
         with sqlite3.connect(db_path) as conn:
             return conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
 
-    r = httpx.post(f"{base}/api/passes", json=PASS)
-    check("left out, both log as NULL", r.status_code == 200 and info() == (None, None), info())
-    r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": "a@example.com", "x402_ready": True})
-    check("api create logs both", r.status_code == 200 and info() == ("a@example.com", 1), info())
-    r = httpx.post(f"{base}/api/passes", json={**PASS, "x402_ready": False})
-    check("x402_ready=False logs 0", r.status_code == 200 and info() == (None, 0), info())
     before = count()
+    for missing in ("contact_email", "x402_ready"):
+        r = httpx.post(f"{base}/api/passes", json={k: v for k, v in PASS.items() if k != missing})
+        check(f"api create without {missing} -> 400, not logged", r.status_code == 400 and missing in r.text and count() == before, r.text)
+        res = asyncio.run(mcp_call("create_wallet_pass", {k: v for k, v in PASS.items() if k != missing}))
+        check(f"mcp create without {missing} is an error, not logged", res.is_error and count() == before, res)
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": None})
+    check("null address -> 400", r.status_code == 400, r.text)
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": ""})
+    check("empty address -> 400", r.status_code == 400 and count() == before, r.text)
     r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": "not an email"})
     check("bad address -> 400, not logged as a call", r.status_code == 400 and count() == before, r.text)
 
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "contact_email": "a@example.com", "x402_ready": True})
+    check("api create logs both", r.status_code == 200 and info() == ("a@example.com", 1), info())
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "x402_ready": False})
+    check("x402_ready=False logs 0", r.status_code == 200 and info() == ("caller@example.com", 0), info())
+
     r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True, "contact_email": "b@example.com"})
     made = r.json()
+    auth = {"authorization": f"Bearer {made['edit_token']}"}
     with sqlite3.connect(db_path) as conn:
         stored = conn.execute("SELECT params FROM passes WHERE serial = ?", (made["serial_number"],)).fetchone()[0]
     check("not stored with the pass", "b@example.com" not in stored and "x402_ready" not in stored, stored)
-    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json={"contact_email": "b@example.com"},
-                    headers={"authorization": f"Bearer {made['edit_token']}"})
+    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json={"description": "v2"}, headers=auth)
+    check("api update without them -> 400", r.status_code == 400, r.text)
+    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json=CALLER, headers=auth)
     check("an update with only these has nothing to change", r.status_code == 400, r.text)
-    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json={"description": "v2", "x402_ready": True},
-                    headers={"authorization": f"Bearer {made['edit_token']}"})
-    check("api update logs them", r.status_code == 200 and info() == (None, 1), r.text)
+    r = httpx.patch(f"{base}/api/passes/{made['serial_number']}", json={**CALLER, "description": "v2", "x402_ready": True}, headers=auth)
+    check("api update logs them", r.status_code == 200 and info() == ("caller@example.com", 1), r.text)
     res = asyncio.run(mcp_call("create_wallet_pass", {**PASS, "contact_email": "c@example.com", "x402_ready": False}))
     check("mcp create logs both", not res.is_error and info() == ("c@example.com", 0), info())
-    res = asyncio.run(mcp_call("update_wallet_pass", {"serial_number": made["serial_number"],
-                                                      "edit_token": made["edit_token"], "description": "v3",
-                                                      "contact_email": "d@example.com"}))
-    check("mcp update logs them", not res.is_error and info() == ("d@example.com", None), info())
+    update = {"serial_number": made["serial_number"], "edit_token": made["edit_token"], "description": "v3"}
+    res = asyncio.run(mcp_call("update_wallet_pass", update))
+    check("mcp update without them is an error", res.is_error, res)
+    res = asyncio.run(mcp_call("update_wallet_pass", {**update, **CALLER, "contact_email": "d@example.com"}))
+    check("mcp update logs them", not res.is_error and info() == ("d@example.com", 0), info())
 
     # --- REST ---
     r = httpx.post(f"{base}/api/passes", json={**PASS, "updatable": True}, headers={"user-agent": "rest-agent/1"})
@@ -99,14 +110,14 @@ try:
     created = r.json()
     check("api create logs User-Agent, no payment", last_row() == ("api", "create", "rest-agent/1", 0, 1), last_row())
 
-    r = httpx.patch(f"{base}/api/passes/{created['serial_number']}", json={"description": "v2"},
+    r = httpx.patch(f"{base}/api/passes/{created['serial_number']}", json={**CALLER, "description": "v2"},
                     headers={"authorization": f"Bearer {created['edit_token']}", "user-agent": "rest-agent/1",
                              "payment-signature": "eyJ4NDAyVmVyc2lvbiI6Mn0="})
     check("api update ok", r.status_code == 200, r.text)
     check("api update with PAYMENT-SIGNATURE logs x402=1", last_row() == ("api", "update", "rest-agent/1", 1, 1),
           last_row())
 
-    r = httpx.patch(f"{base}/api/passes/{created['serial_number']}", json={"description": "v3"},
+    r = httpx.patch(f"{base}/api/passes/{created['serial_number']}", json={**CALLER, "description": "v3"},
                     headers={"authorization": f"Bearer {created['edit_token']}", "x-payment": "e30="})
     check("api update with X-PAYMENT logs x402=1", r.status_code == 200 and last_row()[3] == 1, last_row())
 
