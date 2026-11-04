@@ -79,8 +79,8 @@ server = MCPServer(
         "coupons, store cards and generic passes -- and returns an https download link "
         "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
         "x402_ready. Pricing: a call is one create or one update. "
-        "Free for 30 calls a day per caller IP, while a shared pool of 500 free calls a day lasts; "
-        "every call counts towards the 30, including failed ones, and counts reset at 00:00 UTC"
+        "Free for 30 calls a day per caller IP (20 from 2026-11-18), while a shared pool of 500 free calls "
+        "a day lasts; every call counts towards that limit, including failed ones, and counts reset at 00:00 UTC"
         + (
             f". Past either limit, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
@@ -146,9 +146,10 @@ CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the us
 # Added to a successful result when the caller said x402_ready=false. Information only: the pass,
 # price and limits are the same either way.
 X402_SETUP_HINT = {
-    "message": (f"This client said it can't pay with x402. Calls past the free 30 a day cost {payments.PRICE} "
-                "each in USDC on Base; without x402 they're refused until 00:00 UTC, and the free tier may "
-                "change in the future. The quickest setup is "
+    "message": ("Heads up: the free limit drops from 30 to 20 calls a day per IP on 2026-11-18 (UTC). This "
+                f"client said it can't pay with x402. Calls past the free limit cost {payments.PRICE} each in "
+                "USDC on Base; without x402 they're refused until 00:00 UTC, and the free tier may change "
+                "again in the future. The quickest setup is "
                 "Coinbase's Agentic Wallet (sign in with an email, add $1 for 100 passes); MCP clients can use "
                 "@x402/mcp, other code the x402 SDKs."),
     "guide": X402_GUIDE_URL,
@@ -291,8 +292,8 @@ async def create_wallet_pass(
     edit_token and updatable_until when updatable=True, and x402_setup (how to set up x402
     payments, worth passing on to the user) when x402_ready=False.
 
-    Pricing: a call is one create or one update. Free for 30 calls a day per caller IP, while a
-    shared pool of 500 free calls a day lasts; failed calls count too, and counts reset at 00:00 UTC.
+    Pricing: a call is one create or one update. Free for 30 calls a day per caller IP (20 from
+    2026-11-18), while a shared pool of 500 free calls a day lasts; failed calls count too, and counts reset at 00:00 UTC.
     Past either limit, a call costs $0.01 in USDC on Base, paid with x402; the refusal carries the
     payment requirements, and a paid result includes the payment receipt. Payment is settled only
     after the pass is built, so a failed build is never charged.
