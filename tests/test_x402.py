@@ -139,6 +139,8 @@ def offline_tests():
         r2 = httpx.post(f"{base}/api/passes", json=PASS, headers={"payment-signature": "ignored-under-limit"})
         check("free calls under the limit work, a payment sent with one is ignored",
               r.status_code == r2.status_code == 200 and "payment" not in r2.json() and not seen, r2.text)
+        check("x402_ready=False gets the setup hint", r2.json().get("x402_setup", {}).get("guide")
+              == "https://walletmcppass.com/#x402", r2.text)
 
         # --- REST ---
         r = httpx.post(f"{base}/api/passes", json=PASS)
@@ -220,6 +222,10 @@ def offline_tests():
 
         res = asyncio.run(mcp_call(base, "create_wallet_pass", PASS, meta={"x402/payment": sign(pr)}))
         check("MCP paid call -> pass", not res.is_error and "download_url" in (res.structured_content or {}), res)
+        check("MCP result carries the setup hint", "x402_setup" in (res.structured_content or {}), res)
+        res = asyncio.run(mcp_call(base, "create_wallet_pass", {**PASS, "x402_ready": True},
+                                   meta={"x402/payment": sign(pr)}))
+        check("x402_ready=True gets no setup hint", not res.is_error and "x402_setup" not in res.structured_content, res)
         check("MCP paid result has the receipt in _meta",
               (res.meta or {}).get("x402/payment-response", {}).get("transaction") == "0xfeed", res.meta)
 

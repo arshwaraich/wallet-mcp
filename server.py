@@ -143,6 +143,16 @@ PLACEHOLDER_EMAIL_TLDS = (".example", ".invalid", ".test", ".localhost")
 CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the user about it, and x402_ready shows "
                    "how many clients could pay past the free limit. Both are only logged, and neither changes "
                    "the pass, the price or the limits.")
+# Added to a successful result when the caller said x402_ready=false. Information only: the pass,
+# price and limits are the same either way.
+X402_SETUP_HINT = {
+    "message": (f"This client said it can't pay with x402. Calls past the free 30 a day cost {payments.PRICE} "
+                "each in USDC on Base; without x402 they're refused until 00:00 UTC. The quickest setup is "
+                "Coinbase's Agentic Wallet (sign in with an email, add $1 for 100 passes); MCP clients can use "
+                "@x402/mcp, other code the x402 SDKs."),
+    "guide": X402_GUIDE_URL,
+    "technical_steps": "https://walletmcppass.com/llms-full.txt",
+}
 
 
 @dataclass(frozen=True)
@@ -277,7 +287,8 @@ async def create_wallet_pass(
     updatable_hours (1 hour by default, at most 30 days), then deleted.
 
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus
-    edit_token and updatable_until when updatable=True.
+    edit_token and updatable_until when updatable=True, and x402_setup (how to set up x402
+    payments, worth passing on to the user) when x402_ready=False.
 
     Pricing: a call is one create or one update. Free for 30 calls a day per caller IP, while a
     shared pool of 500 free calls a day lasts; failed calls count too, and counts reset at 00:00 UTC.
@@ -488,7 +499,7 @@ async def update_wallet_pass(
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier,
     notified_devices, updatable_until}. notified_devices counts the iPhones the push was sent to, not ones that
     have already refreshed. The download_url (valid 1 hour) is only needed to add the pass to a
-    new device.
+    new device. With x402_ready=False the result also has x402_setup, as for create_wallet_pass.
     """
     changes = {k: v for k, v in locals().items() if k not in ("ctx", "serial_number", "edit_token")}
     caller = Caller.from_mcp(ctx)
@@ -626,6 +637,7 @@ def _create_pass(
             raise
         if receipt:
             result["payment"] = receipt
+        _add_x402_setup_hint(result, caller)
     except Exception as e:
         _log_failure(e, caller, "create", style, organization_name, serial, start)
         raise _rejection(e, caller, "create") from None
@@ -657,6 +669,11 @@ def _with_caller_info(caller: Caller, contact_email: str | None, x402_ready: boo
              action=action, refused=True)
         raise PassRejected(f"{'; '.join(problems)}. {CALLER_INFO_WHY}", 400)
     return replace(caller, contact_email=contact_email, x402_ready=None if x402_ready == "unknown" else x402_ready)
+
+
+def _add_x402_setup_hint(result: dict, caller: Caller) -> None:
+    if caller.x402_ready is False and payments.enabled:
+        result["x402_setup"] = X402_SETUP_HINT
 
 
 def _is_placeholder_email(address: str) -> bool:
@@ -716,6 +733,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     }
     if receipt:
         result["payment"] = receipt
+    _add_x402_setup_hint(result, caller)
     return result
 
 
