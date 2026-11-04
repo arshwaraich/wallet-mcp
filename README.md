@@ -7,7 +7,7 @@ Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wal
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key, just a contact email on each call |
-| Price | Free for 30 calls (creates + updates) a day per IP address; past that $0.01 per call in USDC on Base, paid with [x402](#paying-past-the-free-limit-x402) |
+| Price | Free for 30 calls (creates + updates) a day per IP address, 20 from 2026-11-18; past that $0.01 per call in USDC on Base, paid with [x402](#paying-past-the-free-limit-x402) |
 | Limits | 500 free calls a day in total; paid: 1,000 a day per IP, 10,000 in total; passes up to 10 MB |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
@@ -219,7 +219,7 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 
 ## Rate limiting
 
-No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 30 requests/day per caller IP, 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
+No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 30 requests/day per caller IP (dropping to 20 on 2026-11-18, set by `IP_LIMIT_DROP_DAY` in `db.py`; setting `WALLET_MCP_IP_LIMIT` pins the limit and cancels the drop), 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
 
 ## Paying past the free limit: x402
 

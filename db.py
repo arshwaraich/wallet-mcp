@@ -14,12 +14,21 @@ DB_PATH.parent.mkdir(exist_ok=True)
 _lock = threading.Lock()
 
 PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 30))
+# The free per-IP limit drops to 20 on this UTC day (announced 2026-11-04). Setting WALLET_MCP_IP_LIMIT
+# pins the limit and cancels the drop, which the tests rely on.
+IP_LIMIT_DROP_DAY, IP_LIMIT_AFTER_DROP = "2026-11-18", 20
 GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
 # Paid calls aren't free-limited, but still capped so no one can exhaust the box's disk or CPU.
 PAID_PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_IP_LIMIT", 1000))
 PAID_GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_GLOBAL_LIMIT", 10000))
 # The per-IP refusal. Past either limit a caller can pay per call (payments.py). The usage watcher matches both texts.
-IP_LIMIT_ERROR = f"rate limit exceeded: max {PER_IP_DAILY_LIMIT} passes/day per caller"
+IP_LIMIT_ERROR = "rate limit exceeded: max {} passes/day per caller"
+
+
+def per_ip_daily_limit() -> int:
+    if "WALLET_MCP_IP_LIMIT" not in os.environ and _today_start() >= IP_LIMIT_DROP_DAY:
+        return IP_LIMIT_AFTER_DROP
+    return PER_IP_DAILY_LIMIT
 
 
 def _conn() -> sqlite3.Connection:
@@ -129,8 +138,9 @@ def check_rate_limit(ip: str) -> str | None:
             "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND COALESCE(error, '') NOT LIKE ?",
             (today, ip, CALLER_INFO_ERROR + "%"),
         ).fetchone()
-        if ip_count >= PER_IP_DAILY_LIMIT:
-            return IP_LIMIT_ERROR
+        limit = per_ip_daily_limit()
+        if ip_count >= limit:
+            return IP_LIMIT_ERROR.format(limit)
     return None
 
 
