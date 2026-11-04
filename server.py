@@ -204,7 +204,7 @@ def _log(caller: Caller, **fields) -> None:
                    contact_email=caller.contact_email, x402_ready=caller.x402_ready, **fields)
 
 
-PUBLIC_BASE_URL = os.environ.get("WALLET_MCP_PUBLIC_URL", "https://vps.arshwaraich.com/wallet-mcp")
+PUBLIC_BASE_URL = os.environ.get("WALLET_MCP_PUBLIC_URL", "https://vps.arshw.com/wallet-mcp")
 
 
 @server.tool(
@@ -1107,7 +1107,7 @@ async def download(request: Request) -> Response:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8400"))
-    public_host = os.environ.get("WALLET_MCP_PUBLIC_HOST", "vps.arshwaraich.com")
+    public_host = os.environ.get("WALLET_MCP_PUBLIC_HOST", "vps.arshw.com")
     transport_security = TransportSecuritySettings(
         allowed_hosts=[public_host, f"127.0.0.1:{port}", f"localhost:{port}"],
         allowed_origins=[f"https://{public_host}", f"http://127.0.0.1:{port}"],
