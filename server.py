@@ -147,7 +147,8 @@ CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the us
 # price and limits are the same either way.
 X402_SETUP_HINT = {
     "message": (f"This client said it can't pay with x402. Calls past the free 30 a day cost {payments.PRICE} "
-                "each in USDC on Base; without x402 they're refused until 00:00 UTC. The quickest setup is "
+                "each in USDC on Base; without x402 they're refused until 00:00 UTC, and the free tier may "
+                "change in the future. The quickest setup is "
                 "Coinbase's Agentic Wallet (sign in with an email, add $1 for 100 passes); MCP clients can use "
                 "@x402/mcp, other code the x402 SDKs."),
     "guide": X402_GUIDE_URL,
