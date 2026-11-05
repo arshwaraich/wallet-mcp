@@ -84,6 +84,14 @@ footer hr{border:none; border-top:1px solid var(--line); margin:0 0 14px}
   </section>
 
   <section>
+    <h2>Website views (walletmcppass.com)</h2>
+    <div class="tiles" id="site-tiles"></div>
+    <div class="bars" id="site-days"></div>
+    <h2 style="margin-top:28px">Website clicks (last 14 days)</h2>
+    <div class="bars" id="site-clicks"></div>
+  </section>
+
+  <section>
     <h2>Requests by pass style (all time)</h2>
     <div class="bars" id="by-style"></div>
   </section>
@@ -134,6 +142,35 @@ async function load() {
       <td class="mono">${esc(c.last_ts.replace('T', ' '))}</td>
     </tr>
   `).join('') : '<tr><td colspan="4" class="empty">No emails yet.</td></tr>';
+
+  const site = d.site;
+  if (!site) {
+    document.getElementById('site-tiles').innerHTML = '<div class="empty">Website stats unavailable.</div>';
+  } else {
+    const today = site.days.length ? site.days[site.days.length - 1] : {views: 0, people: 0};
+    document.getElementById('site-tiles').innerHTML = `
+      <div class="tile"><div class="label">Today</div><div class="value">${today.views}</div><div class="sub">${today.people} people</div></div>
+      <div class="tile"><div class="label">Last 7 days</div><div class="value">${site.week_views}</div><div class="sub">${site.week_people} people</div></div>
+      <div class="tile"><div class="label">All time</div><div class="value">${site.total_views}</div><div class="sub">${site.total_people} people</div></div>
+      <div class="tile"><div class="label">Wallet setup link clicks</div><div class="value">${site.setup_clicks}</div><div class="sub">${site.setup_people} people, all time</div></div>
+    `;
+    const maxDay = Math.max(1, ...site.days.map(x => x.views));
+    document.getElementById('site-days').innerHTML = site.days.slice().reverse().map(x => `
+      <div class="barrow">
+        <div class="name mono">${esc(x.day.slice(5))}</div>
+        <div class="track"><i style="width:${(x.views / maxDay * 100).toFixed(0)}%"></i></div>
+        <div class="count" title="${x.people} people">${x.views}</div>
+      </div>
+    `).join('');
+    const maxClick = Math.max(1, ...site.clicks.map(x => x.c));
+    document.getElementById('site-clicks').innerHTML = site.clicks.length ? site.clicks.map(x => `
+      <div class="barrow">
+        <div class="name">${esc(x.event.replace(/_/g, ' '))}</div>
+        <div class="track"><i style="width:${(x.c / maxClick * 100).toFixed(0)}%"></i></div>
+        <div class="count">${x.c}</div>
+      </div>
+    `).join('') : '<div class="empty">No clicks yet.</div>';
+  }
 
   const maxStyle = Math.max(1, ...d.by_style.map(s => s.c));
   document.getElementById('by-style').innerHTML = d.by_style.length ? d.by_style.map(s => `
