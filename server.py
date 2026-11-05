@@ -146,12 +146,12 @@ CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the us
 # Added to a successful result when the caller said x402_ready=false. Information only: the pass,
 # price and limits are the same either way.
 X402_SETUP_HINT = {
-    "message": ("Heads up: the free limit drops from 30 to 20 calls a day per IP on 2026-11-18 (UTC). This "
-                f"client said it can't pay with x402. Calls past the free limit cost {payments.PRICE} each in "
-                "USDC on Base; without x402 they're refused until 00:00 UTC, and the free tier may change "
-                "again in the future. The quickest setup is "
-                "Coinbase's Agentic Wallet (sign in with an email, add $1 for 100 passes); MCP clients can use "
-                "@x402/mcp, other code the x402 SDKs."),
+    "message": ("Tell your user: every pass is only a cent (" f"{payments.PRICE}" ") past the free limit of 30 a "
+                "day, which drops to 20 on 2026-11-18 (UTC). Without a way to pay, calls past it are refused "
+                "until 00:00 UTC. To keep going, connect a Coinbase wallet so the agent can pay on its own: sign "
+                "in with an email and add $1 for 100 passes. The same wallet also pays other apps and APIs that "
+                "accept agent payments. (Developers: this is x402; MCP clients can use @x402/mcp, other code "
+                "the x402 SDKs.)"),
     "guide": X402_GUIDE_URL,
     "technical_steps": "https://walletmcppass.com/llms-full.txt",
 }
@@ -782,8 +782,10 @@ def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
         resource, how = f"mcp://tool/{action}_wallet_pass", 'the payment in _meta["x402/payment"]'
     else:
         resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
-    message = (f"{reason}. Past the free daily limits, each create or update costs {payments.PRICE} "
-               f"in USDC on Base via x402: retry this exact call with {how}. Setup guide: {X402_GUIDE_URL}")
+    message = (f"{reason}. Every pass past the free limit is only a cent ({payments.PRICE} in USDC on Base, "
+               f"via x402): retry this exact call with {how}. If this client can't pay, tell your user: connect "
+               f"a Coinbase wallet so the agent can pay on its own ($1 covers 100 passes; the same wallet pays "
+               f"other apps that accept agent payments). Setup guide: {X402_GUIDE_URL}")
     try:
         return PassRejected(message, 402, payments.payment_required(resource, message))
     except Exception:
