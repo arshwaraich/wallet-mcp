@@ -46,6 +46,7 @@ import image_fetch
 import image_gen
 import pass_builder
 import payments
+import site_stats
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
@@ -906,7 +907,7 @@ async def dashboard(request: Request) -> Response:
 
 @server.custom_route("/api/stats", methods=["GET"])
 async def api_stats(request: Request) -> Response:
-    return JSONResponse(db.stats())
+    return JSONResponse({**db.stats(), "site": site_stats.stats()})
 
 
 # The REST body accepts exactly the tool's parameters, validated with the same
