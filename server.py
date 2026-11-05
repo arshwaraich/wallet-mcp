@@ -85,7 +85,7 @@ server = MCPServer(
             f". Past either limit, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
             '_meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
-            "build is never charged. Setup guide: https://walletmcppass.com/#x402. Without x402, wait for the reset"
+            "build is never charged. Setup guide: https://walletmcppass.com/#pay. Without x402, wait for the reset"
             if payments.enabled else ""
         )
         + ". Passes are signed with this service's own "
@@ -136,7 +136,7 @@ def _client_ip(request: Request) -> str:
 # x402 payment carriers: the MCP transport's _meta key, and the HTTP headers of x402 v1 and v2.
 X402_META_KEY = "x402/payment"
 X402_HEADERS = ("x-payment", "payment-signature")
-X402_GUIDE_URL = "https://walletmcppass.com/#x402"
+X402_GUIDE_URL = "https://walletmcppass.com/#pay"
 EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 PLACEHOLDER_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "yourcompany.com"}  # the last is our docs
 PLACEHOLDER_EMAIL_TLDS = (".example", ".invalid", ".test", ".localhost")
