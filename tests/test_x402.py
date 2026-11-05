@@ -140,7 +140,7 @@ def offline_tests():
         check("free calls under the limit work, a payment sent with one is ignored",
               r.status_code == r2.status_code == 200 and "payment" not in r2.json() and not seen, r2.text)
         check("x402_ready=False gets the setup hint", r2.json().get("x402_setup", {}).get("guide")
-              == "https://walletmcppass.com/#pay", r2.text)
+              == "https://walletmcppass.com/#wallet-setup", r2.text)
 
         # --- REST ---
         r = httpx.post(f"{base}/api/passes", json=PASS)
@@ -151,7 +151,7 @@ def offline_tests():
               and body["accepts"][0]["payTo"] == PAY_TO and body["accepts"][0]["network"] == NETWORK, body)
         check("402 error says the limit and how to pay",
               "rate limit exceeded" in body.get("error", "") and "PAYMENT-SIGNATURE" in body["error"]
-              and "walletmcppass.com/#pay" in body["error"], body)
+              and "walletmcppass.com/#wallet-setup" in body["error"], body)
         check("PAYMENT-REQUIRED header matches the body", unheader(r.headers["payment-required"]) == body)
         check("the refusal is logged with the limit text the usage watcher matches",
               rows()[-1][:3] == ("create", 0, "rate limit exceeded: max 2 passes/day per caller"), rows()[-1])
