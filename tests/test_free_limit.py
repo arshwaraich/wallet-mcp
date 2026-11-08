@@ -69,6 +69,15 @@ try:
     check("api: first pass free", r1.status_code == 200, r1.text)
     check("api: second pass from the IP refused", r2.status_code in (402, 429), r2.text)
     check("api: exempt email still free", r3.status_code == 200, r3.text)
+    d = httpx.get(f"{base}/api/dashboard").json()
+    check("dashboard: counts every call", d["all"]["calls"] == 3 and d["all"]["at_limit"] == 1, d["all"])
+    check("dashboard: lists every contact", {c["email"] for c in d["contacts"]} == {"a@realco.dev", "b@realco.dev", "payer@x.com"})
+    log = httpx.get(f"{base}/api/requests", params={"status": "limit"}).json()
+    check("log: status filter", log["matching"] == 1 and log["rows"][0]["contact_email"] == "b@realco.dev", log)
+    page = httpx.get(f"{base}/api/requests", params={"limit": 1, "before_id": log["rows"][0]["id"]}).json()
+    check("log: paging by before_id", len(page["rows"]) == 1 and page["rows"][0]["id"] < log["rows"][0]["id"], page)
+    csv_text = httpx.get(f"{base}/api/requests.csv", params={"q": "payer"}).text
+    check("csv: header + filtered rows", csv_text.startswith("id,ts,ip") and csv_text.count("payer@x.com") == 1, csv_text)
 finally:
     proc.terminate()
 
