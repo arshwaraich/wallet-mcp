@@ -375,6 +375,7 @@ async function loadOverview() {
     <dt>Exempt callers, free per IP per day</dt><dd>${L.exempt_per_ip}</dd>
     <dt>Exempt list (data/free_exempt.txt)</dt><dd class="mono">${L.exempt.map(esc).join(', ') || 'none'}</dd>
     <dt>Shared free pool per day</dt><dd>${n(L.global_free)}</dd>
+    <dt>Failed calls per caller per day</dt><dd>${L.fail_per_caller}</dd>
     <dt>Paid cap per IP / total per day</dt><dd>${n(L.paid_per_ip)} / ${n(L.paid_global)}</dd>`;
   $('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
 }

@@ -81,7 +81,7 @@ server = MCPServer(
         "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
         "x402_ready. Pricing: a call is one create or one update. "
         "The first successful call each day per caller (IP address or contact_email) is free (while a shared pool of 500 free "
-        "calls a day lasts); every call after it is paid. Failed calls don't count, and counts reset at 00:00 UTC"
+        "calls a day lasts); every call after it is paid. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC"
         + (
             f". Each paid call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
@@ -295,7 +295,7 @@ async def create_wallet_pass(
 
     Pricing: a call is one create or one update. The first successful call each day per caller (IP address or
     contact_email) is free (while a shared pool of 500 free calls a day lasts); failed calls don't
-    count, and counts reset at 00:00 UTC.
+    count (up to 20 failures a day per caller), and counts reset at 00:00 UTC.
     Every call after it costs $0.01 in USDC on Base, paid with x402; the refusal carries the
     payment requirements, and a paid result includes the payment receipt. Payment is settled only
     after the pass is built, so a failed build is never charged.
@@ -757,6 +757,11 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
         _log(caller, style=style, organization_name=organization_name, success=False,
              error="server is low on disk space", duration_ms=0, serial_number=None, action=action, refused=True)
         raise PassRejected("the service is temporarily out of capacity, try again later", 503)
+    fail_rejection = db.check_fail_limit(caller.ip, caller.contact_email)
+    if fail_rejection:
+        _log(caller, style=style, organization_name=organization_name, success=False,
+             error=fail_rejection, duration_ms=0, serial_number=None, action=action, refused=True)
+        raise PassRejected(fail_rejection, 429)
     rejection = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email), caller.contact_email)
     if rejection is None:
         return None

@@ -57,6 +57,13 @@ log("198.51.100.3", "failer@x.com", success=False)
 log("198.51.100.3", "failer@x.com", success=False, refused=True)
 check("failed calls and refusals don't use the free pass",
       db.check_rate_limit("198.51.100.3", contact_email="failer@x.com") is None)
+for _ in range(db.FAIL_DAILY_LIMIT - 1):
+    log("198.51.100.4", "flaky@x.com", success=False)
+check("under the fail cap", db.check_fail_limit("198.51.100.4", "flaky@x.com") is None)
+log("198.51.100.4", "flaky@x.com", success=False)
+check("fail cap reached by IP", (db.check_fail_limit("198.51.100.4", "new@x.com") or "").startswith("too many failed"))
+check("fail cap reached by email", db.check_fail_limit("198.51.100.5", "Flaky@x.com") is not None)
+check("refusals don't count toward the fail cap", db.check_fail_limit("198.51.100.3", "failer@x.com") is None)
 log("160.79.106.161", "first@x.com")
 check("shared egress IP: another email still free", db.check_rate_limit("160.79.106.161", contact_email="second@x.com") is None)
 check("shared egress IP: same email refused on any of the pool", db.check_rate_limit("160.79.106.23", contact_email="first@x.com") is not None)
