@@ -24,6 +24,10 @@ IP_LIMIT_DROP_DAY, IP_LIMIT_AFTER_DROP = "2026-11-18", 20
 GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
 # Paid calls aren't free-limited, but still capped so no one can exhaust the box's disk or CPU.
 PAID_PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_IP_LIMIT", 1000))
+# Failed calls don't use up the free pass, so they get their own cap per caller (IP or email, like the free
+# pass). The most any caller had failed in a day before this was 8. Paid or not, past it the call is refused.
+FAIL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_FAIL_LIMIT", 20))
+FAIL_LIMIT_ERROR = "too many failed calls today: max {} a day per caller; fix the request and try again tomorrow"
 PAID_GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_GLOBAL_LIMIT", 10000))
 # The per-IP refusal. Past either limit a caller can pay per call (payments.py). The usage watcher matches both texts.
 IP_LIMIT_ERROR = "rate limit exceeded: {} free {} a day per caller (IP address or contact_email), and this caller has used {} today"
@@ -167,6 +171,29 @@ def _today_start() -> str:
 CALLER_INFO_ERROR = "contact_email or x402_ready missing or invalid"
 
 
+def _caller_count(conn, today: str, ip: str, contact_email: str | None, condition: str) -> int:
+    """Today's rows matching condition for this caller: max of by IP and by email (email only on shared egress)."""
+    email = contact_email.strip().lower() if contact_email else None
+    used = 0
+    if not is_shared_egress(ip):
+        (used,) = conn.execute(f"SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND {condition}",
+                               (today, ip)).fetchone()
+    if email:
+        (by_email,) = conn.execute(
+            f"SELECT COUNT(*) FROM requests WHERE ts >= ? AND LOWER(contact_email) = ? AND {condition}",
+            (today, email)).fetchone()
+        used = max(used, by_email)
+    return used
+
+
+def check_fail_limit(ip: str, contact_email: str | None = None) -> str | None:
+    """Returns an error string if the caller has failed too many calls today, else None. Refusals don't count."""
+    with _lock, _conn() as conn:
+        if _caller_count(conn, _today_start(), ip, contact_email, "success = 0 AND refused = 0") >= FAIL_DAILY_LIMIT:
+            return FAIL_LIMIT_ERROR.format(FAIL_DAILY_LIMIT)
+    return None
+
+
 def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = None) -> str | None:
     """Returns an error string if the caller should be rejected, else None.
 
@@ -174,7 +201,6 @@ def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = 
     so neither switching IPs nor switching emails gets another free pass (on shared egress IPs, only
     the email). Only successful calls count: a failed build or a refusal doesn't use up the free pass."""
     today = _today_start()
-    email = contact_email.strip().lower() if contact_email else None
     with _lock, _conn() as conn:
         (global_count,) = conn.execute(
             # Calls paid with x402 don't use up the free daily budget, and neither do refusals, so a
@@ -183,15 +209,7 @@ def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = 
         ).fetchone()
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
-        used = 0
-        if not is_shared_egress(ip):
-            (used,) = conn.execute(
-                "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND success = 1", (today, ip)).fetchone()
-        if email:
-            (by_email,) = conn.execute(
-                "SELECT COUNT(*) FROM requests WHERE ts >= ? AND LOWER(contact_email) = ? AND success = 1",
-                (today, email)).fetchone()
-            used = max(used, by_email)
+        used = _caller_count(conn, today, ip, contact_email, "success = 1")
         limit = per_ip_daily_limit(exempt)
         if used >= limit:
             return IP_LIMIT_ERROR.format(limit, "pass" if limit == 1 else "passes", "it" if limit == 1 else "them")
@@ -509,7 +527,7 @@ def dashboard_stats(days: int = 30) -> dict:
     exempt = [e["email"] + (f" (until {e['until']})" if e["until"] else "") + ("" if e["active"] else " — ended")
               for e in exemptions()]
     out["limits"] = {"free_per_ip": per_ip_daily_limit(), "exempt_per_ip": per_ip_daily_limit(True),
-                     "global_free": GLOBAL_DAILY_LIMIT, "paid_per_ip": PAID_PER_IP_DAILY_LIMIT,
+                     "global_free": GLOBAL_DAILY_LIMIT, "fail_per_caller": FAIL_DAILY_LIMIT, "paid_per_ip": PAID_PER_IP_DAILY_LIMIT,
                      "paid_global": PAID_GLOBAL_DAILY_LIMIT, "exempt": exempt}
     out["days"] = days
     return out
