@@ -83,8 +83,10 @@ try:
     result = asyncio.run(mcp_call())
     check("mcp: tool call succeeds", not result.is_error, result)
 
-    # 4. limits are shared: 1 api + 1 failed build + 1 mcp = 3 = the test limit, so both paths now refuse.
-    #    (schema-invalid bodies are rejected before the limiter, like MCP args, so they don't count)
+    # 4. limits are shared: 1 api + 1 mcp + 1 more api = 3 = the test limit, so both paths now refuse.
+    #    (failed builds don't count, and schema-invalid bodies are rejected before the limiter)
+    r = httpx.post(f"{base}/api/passes", json=PASS)
+    check("api: failed build didn't use up the limit", r.status_code == 200, r.text)
     r = httpx.post(f"{base}/api/passes", json=PASS)
     check("api: 429 once the shared per-IP limit is used up", r.status_code == 429 and "rate limit" in r.json()["error"], r.text)
     result = asyncio.run(mcp_call())
@@ -94,7 +96,7 @@ try:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT source, success FROM requests ORDER BY id").fetchall()
     check("db: old rows migrated as mcp", rows[0] == ("mcp", 1), rows)
-    check("db: sources logged", [r[0] for r in rows[1:]] == ["api", "api", "mcp", "api", "mcp"], rows)
+    check("db: sources logged", [r[0] for r in rows[1:]] == ["api", "api", "mcp", "api", "api", "mcp"], rows)
     stats = httpx.get(f"{base}/api/stats").json()
     check("stats: by_source and recent.source present",
           {s["source"] for s in stats["by_source"]} == {"api", "mcp"} and "source" in stats["recent"][0], stats["by_source"])

@@ -2,6 +2,7 @@
 
 MCP and REST API calls share one log, so the limits cover both combined."""
 import datetime
+import ipaddress
 import os
 import sqlite3
 import threading
@@ -25,7 +26,19 @@ GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
 PAID_PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_IP_LIMIT", 1000))
 PAID_GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_GLOBAL_LIMIT", 10000))
 # The per-IP refusal. Past either limit a caller can pay per call (payments.py). The usage watcher matches both texts.
-IP_LIMIT_ERROR = "rate limit exceeded: {} free {} a day per caller IP, and this IP has used {} today"
+IP_LIMIT_ERROR = "rate limit exceeded: {} free {} a day per caller (IP address or contact_email), and this caller has used {} today"
+# Proxy egress pools shared by many users, where one user also hops between addresses (claude.ai connectors
+# from Anthropic's range, Cloudflare Workers): the IP says nothing about who's calling, so only the email counts.
+SHARED_EGRESS_NETS = [ipaddress.ip_network(n) for n in os.environ.get(
+    "WALLET_MCP_SHARED_EGRESS", "160.79.104.0/21 162.158.0.0/15 172.64.0.0/13 104.16.0.0/13").split()]
+
+
+def is_shared_egress(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in SHARED_EGRESS_NETS)
 
 
 def exemptions() -> list[dict]:
@@ -142,6 +155,7 @@ def init() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ip ON requests(ip)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_email ON requests(LOWER(contact_email))")
 
 
 def _today_start() -> str:
@@ -153,9 +167,14 @@ def _today_start() -> str:
 CALLER_INFO_ERROR = "contact_email or x402_ready missing or invalid"
 
 
-def check_rate_limit(ip: str, exempt: bool = False) -> str | None:
-    """Returns an error string if the caller should be rejected, else None."""
+def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = None) -> str | None:
+    """Returns an error string if the caller should be rejected, else None.
+
+    A caller's free passes are counted by IP address or contact_email, whichever has used more today,
+    so neither switching IPs nor switching emails gets another free pass (on shared egress IPs, only
+    the email). Only successful calls count: a failed build or a refusal doesn't use up the free pass."""
     today = _today_start()
+    email = contact_email.strip().lower() if contact_email else None
     with _lock, _conn() as conn:
         (global_count,) = conn.execute(
             # Calls paid with x402 don't use up the free daily budget, and neither do refusals, so a
@@ -164,12 +183,17 @@ def check_rate_limit(ip: str, exempt: bool = False) -> str | None:
         ).fetchone()
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
-        (ip_count,) = conn.execute(
-            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND COALESCE(error, '') NOT LIKE ?",
-            (today, ip, CALLER_INFO_ERROR + "%"),
-        ).fetchone()
+        used = 0
+        if not is_shared_egress(ip):
+            (used,) = conn.execute(
+                "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND success = 1", (today, ip)).fetchone()
+        if email:
+            (by_email,) = conn.execute(
+                "SELECT COUNT(*) FROM requests WHERE ts >= ? AND LOWER(contact_email) = ? AND success = 1",
+                (today, email)).fetchone()
+            used = max(used, by_email)
         limit = per_ip_daily_limit(exempt)
-        if ip_count >= limit:
+        if used >= limit:
             return IP_LIMIT_ERROR.format(limit, "pass" if limit == 1 else "passes", "it" if limit == 1 else "them")
     return None
 
