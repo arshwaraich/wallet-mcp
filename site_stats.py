@@ -21,6 +21,14 @@ def _human(ip: str | None, ua: str | None) -> bool:
     return ip != SELF_IP and bool(ua) and not any(b in ua for b in BOT_UA)
 
 
+def _count_clicks(rows) -> list[dict]:
+    counts: dict[str, int] = {}
+    for event, ip, ua in rows:
+        if _human(ip, ua):
+            counts[event] = counts.get(event, 0) + 1
+    return sorted(({"event": e, "c": c} for e, c in counts.items()), key=lambda x: -x["c"])
+
+
 def stats(days: int = 14) -> dict | None:
     try:
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2)
@@ -28,6 +36,7 @@ def stats(days: int = 14) -> dict | None:
             rows = con.execute("SELECT ts, event, ip, ua FROM events WHERE ts >= date('now', ?)",
                                (f"-{days - 1} day",)).fetchall()
             total = con.execute("SELECT ip, ua FROM events WHERE event = 'pageview'").fetchall()
+            all_clicks = con.execute("SELECT event, ip, ua FROM events WHERE event != 'pageview'").fetchall()
             setup_all = con.execute("SELECT count(*), count(DISTINCT ip) FROM events WHERE event = ?",
                                     (SETUP_CLICK,)).fetchone()
         finally:
@@ -57,4 +66,5 @@ def stats(days: int = 14) -> dict | None:
         "setup_clicks": setup_all[0],
         "setup_people": setup_all[1],
         "clicks": sorted(({"event": e, "c": c} for e, c in clicks.items()), key=lambda x: -x["c"]),
+        "clicks_all": _count_clicks(all_clicks),
     }

@@ -910,6 +910,40 @@ async def api_stats(request: Request) -> Response:
     return JSONResponse({**db.stats(), "site": site_stats.stats()})
 
 
+# Dashboard data (tailnet only: nginx sends the public domain's /api/ to the landing page, never here).
+@server.custom_route("/api/dashboard", methods=["GET"])
+async def api_dashboard(request: Request) -> Response:
+    days = min(max(int(request.query_params.get("days") or 30), 1), 366)
+    return JSONResponse({**await anyio.to_thread.run_sync(db.dashboard_stats, days),
+                         "site": await anyio.to_thread.run_sync(site_stats.stats, days)})
+
+
+def _log_filters(request: Request) -> dict:
+    q = request.query_params
+    return {k: (q.get(k) or None) for k in ("status", "source", "action", "q", "since")}
+
+
+@server.custom_route("/api/requests", methods=["GET"])
+async def api_requests(request: Request) -> Response:
+    before = request.query_params.get("before_id")
+    limit = min(max(int(request.query_params.get("limit") or 100), 1), 1000)
+    return JSONResponse(await anyio.to_thread.run_sync(lambda: db.request_log(
+        before_id=int(before) if before else None, limit=limit, **_log_filters(request))))
+
+
+@server.custom_route("/api/requests.csv", methods=["GET"])
+async def api_requests_csv(request: Request) -> Response:
+    import csv
+    import io
+    rows = (await anyio.to_thread.run_sync(lambda: db.request_log(limit=0, **_log_filters(request))))["rows"]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=db.LOG_COLUMNS)
+    writer.writeheader()
+    writer.writerows(rows)
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"content-disposition": 'attachment; filename="wallet-mcp-requests.csv"'})
+
+
 # The REST body accepts exactly the tool's parameters, validated with the same
 # types, so the API and the MCP tool can't drift apart.
 _PassRequest = create_model(

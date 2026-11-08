@@ -370,3 +370,110 @@ def stats() -> dict:
             "contacts": [dict(c) for c in contacts[:100]],
         },
     }
+
+
+# ---- Dashboard: the full request log and every aggregate, for the tailnet-only dashboard ----
+
+LOG_COLUMNS = ("id", "ts", "ip", "source", "action", "style", "organization_name", "success", "refused", "error",
+               "duration_ms", "serial_number", "client", "x402", "payment_tx", "contact_email", "x402_ready")
+# status filter -> SQL condition. "limit" = refused at the free limit (the 402 pay-to-continue path).
+LOG_STATUS = {
+    "ok": "success = 1",
+    "paid": "payment_tx IS NOT NULL",
+    "failed": "success = 0 AND refused = 0",
+    "refused": "refused = 1",
+    "limit": "refused = 1 AND (error LIKE 'rate limit exceeded%' OR error LIKE 'service is at its daily%')",
+    "caller_info": "error LIKE '" + CALLER_INFO_ERROR + "%'",
+}
+
+
+def _log_where(status: str | None, source: str | None, action: str | None, q: str | None,
+               since: str | None) -> tuple[str, list]:
+    where, args = [], []
+    if status in LOG_STATUS:
+        where.append(LOG_STATUS[status])
+    if source in ("mcp", "api"):
+        where.append("source = ?"), args.append(source)
+    if action in ("create", "update"):
+        where.append("action = ?"), args.append(action)
+    if since:
+        where.append("ts >= ?"), args.append(since)
+    if q:
+        like = f"%{q.strip()}%"
+        where.append("(ip LIKE ? OR contact_email LIKE ? OR organization_name LIKE ? OR client LIKE ? "
+                     "OR serial_number LIKE ? OR error LIKE ? OR style LIKE ? OR payment_tx LIKE ?)")
+        args += [like] * 8
+    return (" WHERE " + " AND ".join(where)) if where else "", args
+
+
+def request_log(*, before_id: int | None = None, limit: int = 100, status=None, source=None, action=None,
+                q=None, since=None) -> dict:
+    """Newest first, paged by id. limit=0 returns every matching row (for the CSV export)."""
+    where, args = _log_where(status, source, action, q, since)
+    with _lock, _conn() as conn:
+        (matching,) = conn.execute(f"SELECT COUNT(*) FROM requests{where}", args).fetchone()
+        page_where = where + (" AND " if where else " WHERE ") + "id < ?" if before_id else where
+        page_args = [*args, before_id] if before_id else args
+        sql = f"SELECT {', '.join(LOG_COLUMNS)} FROM requests{page_where} ORDER BY id DESC"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        rows = [dict(r) for r in conn.execute(sql, page_args)]
+    return {"matching": matching, "rows": rows}
+
+
+def dashboard_stats(days: int = 30) -> dict:
+    today = _today_start()
+    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days - 1)).strftime(
+        "%Y-%m-%dT00:00:00")
+    lim = LOG_STATUS["limit"]
+    ci = LOG_STATUS["caller_info"]
+    counts = f"""COUNT(*) calls, SUM(success) ok, SUM(payment_tx IS NOT NULL) paid,
+                 SUM(success = 0 AND refused = 0) failed, SUM({lim}) at_limit, SUM({ci}) caller_info,
+                 COUNT(DISTINCT ip) ips, COUNT(DISTINCT LOWER(contact_email)) emails"""
+    with _lock, _conn() as conn:
+        def one(sql, *a):
+            return dict(conn.execute(sql, a).fetchone())
+
+        def many(sql, *a):
+            return [dict(r) for r in conn.execute(sql, a)]
+
+        out = {
+            "all": one(f"SELECT {counts}, MIN(ts) first_ts FROM requests"),
+            "today": one(f"SELECT {counts} FROM requests WHERE ts >= ?", today),
+            "week": one(f"SELECT {counts} FROM requests WHERE ts >= ?", (
+                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=6)).strftime("%Y-%m-%dT00:00:00")),
+            "by_day": many(f"SELECT substr(ts, 1, 10) day, {counts} FROM requests WHERE ts >= ? "
+                           "GROUP BY day ORDER BY day", since),
+            "by_style": many("SELECT COALESCE(style, '?') k, COUNT(*) c, SUM(success) ok FROM requests "
+                             "GROUP BY k ORDER BY c DESC"),
+            "by_source": many("SELECT source k, COUNT(*) c, SUM(success) ok FROM requests GROUP BY k ORDER BY c DESC"),
+            "by_action": many("SELECT action k, COUNT(*) c, SUM(success) ok FROM requests GROUP BY k ORDER BY c DESC"),
+            "clients": many("""SELECT COALESCE(client, 'unknown') k, COUNT(*) c, SUM(success) ok,
+                                      SUM(payment_tx IS NOT NULL) paid, COUNT(DISTINCT ip) ips, MAX(ts) last_ts
+                               FROM requests GROUP BY k ORDER BY c DESC"""),
+            "errors": many(f"""SELECT substr(error, 1, 90) k, COUNT(*) c, MAX(ts) last_ts FROM requests
+                               WHERE success = 0 GROUP BY k ORDER BY c DESC"""),
+            # SQLite takes the bare x402_ready from the MAX(id) row, so this is each email's latest answer.
+            "contacts": many(f"""SELECT LOWER(contact_email) email, x402_ready, MAX(id) last_id, COUNT(*) calls,
+                                        SUM(success) ok, SUM(payment_tx IS NOT NULL) paid, SUM({lim}) at_limit,
+                                        COUNT(DISTINCT ip) ips, MIN(ts) first_ts, MAX(ts) last_ts
+                                 FROM requests WHERE contact_email IS NOT NULL
+                                 GROUP BY LOWER(contact_email) ORDER BY last_id DESC"""),
+            "payments": many("""SELECT id, ts, ip, contact_email, client, action, style, organization_name, payment_tx
+                                FROM requests WHERE payment_tx IS NOT NULL ORDER BY id DESC"""),
+            "ips": many(f"""SELECT ip k, COUNT(*) c, SUM(success) ok, SUM(payment_tx IS NOT NULL) paid,
+                                   SUM({lim}) at_limit, COUNT(DISTINCT LOWER(contact_email)) emails, MAX(ts) last_ts
+                            FROM requests GROUP BY ip ORDER BY c DESC LIMIT 500"""),
+            "updatable_passes": one("SELECT COUNT(*) stored, COALESCE(SUM(expires > strftime('%s','now')), 0) live "
+                                    "FROM passes"),
+            "registrations": one("SELECT COUNT(*) devices FROM registrations"),
+        }
+    try:
+        exempt = [l.strip() for l in EXEMPT_FILE.read_text().splitlines() if l.strip() and not l.startswith("#")]
+    except FileNotFoundError:
+        exempt = []
+    out["limits"] = {"free_per_ip": per_ip_daily_limit(), "exempt_per_ip": per_ip_daily_limit(True),
+                     "global_free": GLOBAL_DAILY_LIMIT, "paid_per_ip": PAID_PER_IP_DAILY_LIMIT,
+                     "paid_global": PAID_GLOBAL_DAILY_LIMIT, "exempt": exempt}
+    out["days"] = days
+    return out
