@@ -80,10 +80,10 @@ server = MCPServer(
         "coupons, store cards and generic passes -- and returns an https download link "
         "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
         "x402_ready. Pricing: a call is one create or one update. "
-        "Free for 30 calls a day per caller IP (20 from 2026-11-18), while a shared pool of 500 free calls "
-        "a day lasts; every call counts towards that limit, including failed ones, and counts reset at 00:00 UTC"
+        "The first call each day per caller IP is free (while a shared pool of 500 free calls a day lasts); "
+        "every call after it is paid. Every call counts, including failed ones, and counts reset at 00:00 UTC"
         + (
-            f". Past either limit, each call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
+            f". Each paid call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
             '_meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
             "build is never charged. Setup guide: https://walletmcppass.com/#wallet-setup. Without x402, wait for the reset"
@@ -142,16 +142,16 @@ EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 PLACEHOLDER_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "yourcompany.com"}  # the last is our docs
 PLACEHOLDER_EMAIL_TLDS = (".example", ".invalid", ".test", ".localhost")
 CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the user about it, and x402_ready shows "
-                   "how many clients could pay past the free limit. Both are only logged, and neither changes "
+                   "how many clients could pay after their free first pass. Both are only logged, and neither changes "
                    "the pass, the price or the limits.")
 # Added to a successful result when the caller said x402_ready=false. Information only: the pass,
 # price and limits are the same either way.
 X402_SETUP_HINT = {
     "message": ("Tell your user: AI agents can now pay for things on their own. Setting up a Coinbase Agentic "
                 "Wallet for this agent once (sign in with an email, add a few dollars) lets it pay any app or "
-                "service that accepts agent payments, not just this one. Here, every pass past the free limit "
-                f"is only a cent ({payments.PRICE}), so $1 covers 100 passes. The free limit is 30 a day and "
-                "drops to 20 on 2026-11-18 (UTC); without a wallet, calls past it are refused until 00:00 UTC. "
+                "service that accepts agent payments, not just this one. Here, the first pass each day is free "
+                f"and every pass after it is only a cent ({payments.PRICE}), so $1 covers 100 passes. Without a "
+                "wallet, every call after the first one is refused until 00:00 UTC. "
                 "(Developers: this is x402; MCP clients can use @x402/mcp, other code the x402 SDKs.)"),
     "guide": X402_GUIDE_URL,
     "technical_steps": "https://walletmcppass.com/llms-full.txt",
@@ -293,9 +293,9 @@ async def create_wallet_pass(
     edit_token and updatable_until when updatable=True, and x402_setup (how to set up x402
     payments, worth passing on to the user) when x402_ready=False.
 
-    Pricing: a call is one create or one update. Free for 30 calls a day per caller IP (20 from
-    2026-11-18), while a shared pool of 500 free calls a day lasts; failed calls count too, and counts reset at 00:00 UTC.
-    Past either limit, a call costs $0.01 in USDC on Base, paid with x402; the refusal carries the
+    Pricing: a call is one create or one update. The first call each day per caller IP is free (while a
+    shared pool of 500 free calls a day lasts); failed calls count too, and counts reset at 00:00 UTC.
+    Every call after it costs $0.01 in USDC on Base, paid with x402; the refusal carries the
     payment requirements, and a paid result includes the payment receipt. Payment is settled only
     after the pass is built, so a failed build is never charged.
 
@@ -418,7 +418,7 @@ async def create_wallet_pass(
             from the pass details or make one up. It isn't added to the pass, and it's kept in the
             request log.
         x402_ready: required. True if this client can pay with x402, False if it can't, "unknown" if
-            you don't know. It shows the operator how many clients could pay past the free limit.
+            you don't know. It shows the operator how many clients could pay after the free first pass.
             Only logged: it changes neither price nor limits.
 
     """
@@ -756,7 +756,7 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
         _log(caller, style=style, organization_name=organization_name, success=False,
              error="server is low on disk space", duration_ms=0, serial_number=None, action=action, refused=True)
         raise PassRejected("the service is temporarily out of capacity, try again later", 503)
-    rejection = db.check_rate_limit(caller.ip)
+    rejection = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email))
     if rejection is None:
         return None
     payable = payments.enabled
@@ -783,7 +783,7 @@ def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
         resource, how = f"mcp://tool/{action}_wallet_pass", 'the payment in _meta["x402/payment"]'
     else:
         resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
-    message = (f"{reason}. Past the free limit every pass is only a cent ({payments.PRICE} in USDC on Base, "
+    message = (f"{reason}. Only the first pass each day is free; every pass after it is only a cent ({payments.PRICE} in USDC on Base, "
                f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
                f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
                f"once lets it pay any app or service that accepts agent payments, not just this one; here $1 "

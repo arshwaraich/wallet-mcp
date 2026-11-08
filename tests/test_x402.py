@@ -154,7 +154,7 @@ def offline_tests():
               and "walletmcppass.com/#wallet-setup" in body["error"], body)
         check("PAYMENT-REQUIRED header matches the body", unheader(r.headers["payment-required"]) == body)
         check("the refusal is logged with the limit text the usage watcher matches",
-              rows()[-1][:3] == ("create", 0, "rate limit exceeded: max 2 passes/day per caller"), rows()[-1])
+              rows()[-1][:3] == ("create", 0, "rate limit exceeded: 2 free passes a day per caller IP, and this IP has used them today"), rows()[-1])
 
         r = httpx.post(f"{base}/api/passes", json=PASS, headers={"payment-signature": header(sign(body))})
         check("REST paid call -> 200 with a pass", r.status_code == 200 and "download_url" in r.json(), r.text)

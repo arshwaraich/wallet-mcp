@@ -1,4 +1,4 @@
-# wallet-mcp: free Apple Wallet pass generator for Claude, ChatGPT and any MCP client
+# wallet-mcp: Apple Wallet pass generator for Claude, ChatGPT and any MCP client
 
 Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wallet pass (`.pkpass`) from an AI assistant, with no Apple Developer account. wallet-mcp is the open-source server behind [walletmcppass.com](https://walletmcppass.com): an MCP server with two tools, `create_wallet_pass` and `update_wallet_pass`, and the same pass builder as a REST API.
 
@@ -7,7 +7,7 @@ Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wal
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key, just a contact email on each call |
-| Price | Free for 30 calls (creates + updates) a day per IP address, 20 from 2026-11-18; past that $0.01 per call in USDC on Base, paid with [x402](#paying-past-the-free-limit-x402) |
+| Price | The first call (create or update) each day per IP address is free; every call after it is $0.01 in USDC on Base, paid with [x402](#paying-with-x402) |
 | Limits | 500 free calls a day in total; paid: 1,000 a day per IP, 10,000 in total; passes up to 10 MB |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
@@ -157,7 +157,7 @@ curl https://walletmcppass.com/api/passes \
 |---|---|
 | 200 | Same as the tool: `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }` |
 | 400 | `{"error": "invalid request", "details": [...]}` for a malformed body or wrong types; `{"error": "..."}` when the pass itself is invalid |
-| 402 | Past a free limit (per-IP or global): an x402 `PaymentRequired` body (also base64'd in the `PAYMENT-REQUIRED` header). Retry with a payment, see [below](#paying-past-the-free-limit-x402) |
+| 402 | Past a free limit (per-IP or global): an x402 `PaymentRequired` body (also base64'd in the `PAYMENT-REQUIRED` header). Retry with a payment, see [below](#paying-with-x402) |
 | 429 | `{"error": "rate limit exceeded: ..."}` or `"service is at its daily request limit ..."` — only when payments are off |
 | 500 | `{"error": "internal error building the pass"}` |
 
@@ -219,11 +219,11 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 
 ## Rate limiting
 
-No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 30 requests/day per caller IP (dropping to 20 on 2026-11-18, set by `IP_LIMIT_DROP_DAY` in `db.py`; setting `WALLET_MCP_IP_LIMIT` pins the limit and cancels the drop), 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
+No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 1 free call/day per caller IP (`WALLET_MCP_IP_LIMIT`; every call after it is paid), 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). **Exemptions:** a caller whose `contact_email` is listed in `data/free_exempt.txt` (one address per line, `#` comments, case-insensitive, read on every call so no restart is needed; `WALLET_MCP_EXEMPT_FILE` moves it) keeps the older free limit of 30 calls/day, 20 from 2026-11-18 (`IP_LIMIT_DROP_DAY`; `WALLET_MCP_EXEMPT_IP_LIMIT` pins it). The file is under the gitignored `data/`, so the list isn't published. If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
 
-## Paying past the free limit: x402
+## Paying with x402
 
-Both tools and the REST API also require two inputs that are only logged, as `requests` columns: `contact_email` (the user's address, so the operator can reach them about the service; a missing, malformed or placeholder one is a 400 that is logged as refused but doesn't count as a call) and `x402_ready` (true, false or `"unknown"`, which shows how many clients could pay past the free limit; separate from the `x402` column, which records whether a call actually sent a payment).
+Both tools and the REST API also require two inputs that are only logged, as `requests` columns: `contact_email` (the user's address, so the operator can reach them about the service; a missing, malformed or placeholder one is a 400 that is logged as refused but doesn't count as a call) and `x402_ready` (true, false or `"unknown"`, which shows how many clients could pay after their free first call; separate from the `x402` column, which records whether a call actually sent a payment).
 
 Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
 
