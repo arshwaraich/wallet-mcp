@@ -154,7 +154,7 @@ def offline_tests():
               and "walletmcppass.com/#wallet-setup" in body["error"], body)
         check("PAYMENT-REQUIRED header matches the body", unheader(r.headers["payment-required"]) == body)
         check("the refusal is logged with the limit text the usage watcher matches",
-              rows()[-1][:3] == ("create", 0, "rate limit exceeded: 2 free passes a day per caller IP, and this IP has used them today"), rows()[-1])
+              rows()[-1][:3] == ("create", 0, "rate limit exceeded: 2 free passes a day per caller (IP address or contact_email), and this caller has used them today"), rows()[-1])
 
         r = httpx.post(f"{base}/api/passes", json=PASS, headers={"payment-signature": header(sign(body))})
         check("REST paid call -> 200 with a pass", r.status_code == 200 and "download_url" in r.json(), r.text)
@@ -272,7 +272,8 @@ def offline_tests():
         httpx.post(f"{base}/api/passes", json=PASS, headers=hog)
         for _ in range(5):
             httpx.post(f"{base}/api/passes", json=PASS, headers=hog)
-        r = httpx.post(f"{base}/api/passes", json=PASS, headers={"x-real-ip": "198.51.100.21"})
+        r = httpx.post(f"{base}/api/passes", json=PASS | {"contact_email": "other@realco.dev"},
+                       headers={"x-real-ip": "198.51.100.21"})
         check("after 5 refused retries from one IP, another IP still gets a free call", r.status_code == 200, r.text)
         with sqlite3.connect(db_path) as conn:
             refused = conn.execute("SELECT COUNT(*) FROM requests WHERE refused = 1").fetchone()[0]

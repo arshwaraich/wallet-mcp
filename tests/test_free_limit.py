@@ -46,6 +46,21 @@ check("second call refused", err and err.startswith("rate limit exceeded: 1 free
 check("exempt caller on same IP still free", db.check_rate_limit(ip, exempt=True) is None)
 check("other IP still gets its free pass", db.check_rate_limit("203.0.113.10") is None)
 
+def log(ip, email, success=True, refused=False):
+    db.log_request(ip=ip, style="generic", organization_name="o", success=success, error=None if success else "x",
+                   duration_ms=1, serial_number="s", source="api", contact_email=email, refused=refused)
+
+log("198.51.100.1", "hopper@x.com")
+check("same email, new IP refused", db.check_rate_limit("198.51.100.2", contact_email="Hopper@X.com") is not None)
+check("new email, used IP refused", db.check_rate_limit("198.51.100.1", contact_email="other@x.com") is not None)
+log("198.51.100.3", "failer@x.com", success=False)
+log("198.51.100.3", "failer@x.com", success=False, refused=True)
+check("failed calls and refusals don't use the free pass",
+      db.check_rate_limit("198.51.100.3", contact_email="failer@x.com") is None)
+log("160.79.106.161", "first@x.com")
+check("shared egress IP: another email still free", db.check_rate_limit("160.79.106.161", contact_email="second@x.com") is None)
+check("shared egress IP: same email refused on any of the pool", db.check_rate_limit("160.79.106.23", contact_email="first@x.com") is not None)
+
 # End to end through the REST API: the exemption is keyed on the call's contact_email.
 import socket, subprocess, time  # noqa: E402
 import httpx  # noqa: E402

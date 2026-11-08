@@ -80,8 +80,8 @@ server = MCPServer(
         "coupons, store cards and generic passes -- and returns an https download link "
         "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
         "x402_ready. Pricing: a call is one create or one update. "
-        "The first call each day per caller IP is free (while a shared pool of 500 free calls a day lasts); "
-        "every call after it is paid. Every call counts, including failed ones, and counts reset at 00:00 UTC"
+        "The first successful call each day per caller (IP address or contact_email) is free (while a shared pool of 500 free "
+        "calls a day lasts); every call after it is paid. Failed calls don't count, and counts reset at 00:00 UTC"
         + (
             f". Each paid call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
@@ -293,8 +293,9 @@ async def create_wallet_pass(
     edit_token and updatable_until when updatable=True, and x402_setup (how to set up x402
     payments, worth passing on to the user) when x402_ready=False.
 
-    Pricing: a call is one create or one update. The first call each day per caller IP is free (while a
-    shared pool of 500 free calls a day lasts); failed calls count too, and counts reset at 00:00 UTC.
+    Pricing: a call is one create or one update. The first successful call each day per caller (IP address or
+    contact_email) is free (while a shared pool of 500 free calls a day lasts); failed calls don't
+    count, and counts reset at 00:00 UTC.
     Every call after it costs $0.01 in USDC on Base, paid with x402; the refusal carries the
     payment requirements, and a paid result includes the payment receipt. Payment is settled only
     after the pass is built, so a failed build is never charged.
@@ -756,7 +757,7 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
         _log(caller, style=style, organization_name=organization_name, success=False,
              error="server is low on disk space", duration_ms=0, serial_number=None, action=action, refused=True)
         raise PassRejected("the service is temporarily out of capacity, try again later", 503)
-    rejection = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email))
+    rejection = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email), caller.contact_email)
     if rejection is None:
         return None
     payable = payments.enabled

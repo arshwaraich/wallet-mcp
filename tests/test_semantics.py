@@ -88,7 +88,7 @@ raises("unknown info link", lambda: pb.build_pass_json(style="eventTicket", info
 # --- the tool itself: which image files end up in the package
 import server
 
-server.db.check_rate_limit = lambda ip, exempt=False: None
+server.db.check_rate_limit = lambda ip, exempt=False, contact_email=None: None
 server.db.log_request = lambda **kw: None
 captured = {}
 server._register_download = lambda data: captured.setdefault("pkpass", data) and "tok"
