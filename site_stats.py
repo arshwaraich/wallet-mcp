@@ -2,6 +2,7 @@
 (~/projects/walletmcppass-landing/data/walletmcppass.db, mounted read-only into this unit), for the
 tailnet dashboard. Returns None if the db can't be read, so the pass stats still load."""
 import logging
+import re
 import os
 import sqlite3
 from pathlib import Path
@@ -9,6 +10,11 @@ from pathlib import Path
 DB_PATH = Path(os.environ.get("WALLET_MCP_SITE_DB",
                               Path.home() / "projects/walletmcppass-landing/data/walletmcppass.db"))
 SELF_IP = "149.56.100.54"  # the VPS itself: my own checks
+# A vulnerability scanner (2026-09-22, before /api/track allowlisted event names) that sent ~2,700
+# junk "clicks" (SQL/path-traversal payloads, "unknown") and 435 page views with a browser user-agent.
+SCANNER_IPS = {"188.253.123.2"}
+# Real button names are snake_case (track('nav_connect')); anything else was injected, so it's not shown.
+EVENT_NAME = re.compile(r"[a-z][a-z0-9_]{1,40}")
 # Uptime checkers, crawlers and scripts; matched against the lower-cased user-agent.
 BOT_UA = ("bot", "crawl", "spider", "check", "curl", "python", "monitor", "uptime", "headless", "preview")
 SETUP_CLICK = "wallet_setup_coinbase"
@@ -18,13 +24,17 @@ logger = logging.getLogger(__name__)
 
 def _human(ip: str | None, ua: str | None) -> bool:
     ua = (ua or "").lower()
-    return ip != SELF_IP and bool(ua) and not any(b in ua for b in BOT_UA)
+    return ip != SELF_IP and ip not in SCANNER_IPS and bool(ua) and not any(b in ua for b in BOT_UA)
+
+
+def _real_event(event: str) -> bool:
+    return event != "unknown" and bool(EVENT_NAME.fullmatch(event or ""))
 
 
 def _count_clicks(rows) -> list[dict]:
     counts: dict[str, int] = {}
     for event, ip, ua in rows:
-        if _human(ip, ua):
+        if _human(ip, ua) and _real_event(event):
             counts[event] = counts.get(event, 0) + 1
     return sorted(({"event": e, "c": c} for e, c in counts.items()), key=lambda x: -x["c"])
 
@@ -53,7 +63,7 @@ def stats(days: int = 14) -> dict | None:
             day = by_day.setdefault(ts[:10], {"views": 0, "ips": set()})
             day["views"] += 1
             day["ips"].add(ip)
-        else:
+        elif _real_event(event):
             clicks[event] = clicks.get(event, 0) + 1
     human_total = [(ip, ua) for ip, ua in total if _human(ip, ua)]
     week = sorted(by_day)[-7:]
