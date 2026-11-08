@@ -320,7 +320,7 @@ async function loadOverview() {
   ], d.payments);
   $('pay-count').textContent = `${n(d.payments.length)} · ${usd(d.payments.length * PRICE_CENTS)} total`;
 
-  const exempt = new Set(d.limits.exempt.map(e => e.toLowerCase()));
+  const exempt = new Set(d.limits.exempt.filter(e => !e.includes('ended')).map(e => e.split(' ')[0]));
   table('t-contacts', [
     {k: 'email', label: 'Email', cls: 'mono', fmt: r => `${ipLink(r.email)}${exempt.has(r.email) ? ' <span class="lim">exempt</span>' : ''}`},
     {k: 'x402_ready', label: 'x402 ready', fmt: r => ready(r.x402_ready)},

@@ -28,15 +28,29 @@ PAID_GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_GLOBAL_LIMIT", 100
 IP_LIMIT_ERROR = "rate limit exceeded: {} free {} a day per caller IP, and this IP has used {} today"
 
 
-def is_exempt(contact_email: str | None) -> bool:
-    """Read on every call, so editing the file takes effect without a restart."""
-    if not contact_email:
-        return False
+def exemptions() -> list[dict]:
+    """Lines of EXEMPT_FILE: "email" or "email until=YYYY-MM-DD" (exempt up to the end of the day before,
+    UTC, so the change applies from 00:00 UTC on that date). Read on every call, so edits need no restart."""
     try:
         lines = EXEMPT_FILE.read_text().splitlines()
     except FileNotFoundError:
+        return []
+    out = []
+    for line in lines:
+        parts = line.split()
+        if not parts or parts[0].startswith("#"):
+            continue
+        until = next((p[6:] for p in parts[1:] if p.startswith("until=")), None)
+        out.append({"email": parts[0].lower(), "until": until,
+                    "active": until is None or _today_start()[:10] < until})
+    return out
+
+
+def is_exempt(contact_email: str | None) -> bool:
+    if not contact_email:
         return False
-    return contact_email.strip().lower() in {l.strip().lower() for l in lines if l.strip() and not l.startswith("#")}
+    email = contact_email.strip().lower()
+    return any(e["email"] == email and e["active"] for e in exemptions())
 
 
 def per_ip_daily_limit(exempt: bool = False) -> int:
@@ -468,10 +482,8 @@ def dashboard_stats(days: int = 30) -> dict:
                                     "FROM passes"),
             "registrations": one("SELECT COUNT(*) devices FROM registrations"),
         }
-    try:
-        exempt = [l.strip() for l in EXEMPT_FILE.read_text().splitlines() if l.strip() and not l.startswith("#")]
-    except FileNotFoundError:
-        exempt = []
+    exempt = [e["email"] + (f" (until {e['until']})" if e["until"] else "") + ("" if e["active"] else " — ended")
+              for e in exemptions()]
     out["limits"] = {"free_per_ip": per_ip_daily_limit(), "exempt_per_ip": per_ip_daily_limit(True),
                      "global_free": GLOBAL_DAILY_LIMIT, "paid_per_ip": PAID_PER_IP_DAILY_LIMIT,
                      "paid_global": PAID_GLOBAL_DAILY_LIMIT, "exempt": exempt}
