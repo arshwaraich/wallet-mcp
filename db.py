@@ -13,22 +13,38 @@ DB_PATH.parent.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
 
-PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 30))
-# The free per-IP limit drops to 20 on this UTC day (announced 2026-11-04). Setting WALLET_MCP_IP_LIMIT
-# pins the limit and cancels the drop, which the tests rely on.
+# Free calls a day per caller IP: the first pass is free, everything after it is paid (2026-11-08).
+PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 1))
+# Exempt callers (contact_email listed in EXEMPT_FILE, one per line, not in git) keep the old free
+# limit: 30 a day, dropping to 20 on IP_LIMIT_DROP_DAY (UTC). WALLET_MCP_EXEMPT_IP_LIMIT pins it.
+EXEMPT_FILE = Path(os.environ.get("WALLET_MCP_EXEMPT_FILE", DB_PATH.parent / "free_exempt.txt"))
+EXEMPT_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_EXEMPT_IP_LIMIT", 30))
 IP_LIMIT_DROP_DAY, IP_LIMIT_AFTER_DROP = "2026-11-18", 20
 GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_GLOBAL_LIMIT", 500))
 # Paid calls aren't free-limited, but still capped so no one can exhaust the box's disk or CPU.
 PAID_PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_IP_LIMIT", 1000))
 PAID_GLOBAL_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_PAID_GLOBAL_LIMIT", 10000))
 # The per-IP refusal. Past either limit a caller can pay per call (payments.py). The usage watcher matches both texts.
-IP_LIMIT_ERROR = "rate limit exceeded: max {} passes/day per caller"
+IP_LIMIT_ERROR = "rate limit exceeded: {} free {} a day per caller IP, and this IP has used {} today"
 
 
-def per_ip_daily_limit() -> int:
-    if "WALLET_MCP_IP_LIMIT" not in os.environ and _today_start() >= IP_LIMIT_DROP_DAY:
+def is_exempt(contact_email: str | None) -> bool:
+    """Read on every call, so editing the file takes effect without a restart."""
+    if not contact_email:
+        return False
+    try:
+        lines = EXEMPT_FILE.read_text().splitlines()
+    except FileNotFoundError:
+        return False
+    return contact_email.strip().lower() in {l.strip().lower() for l in lines if l.strip() and not l.startswith("#")}
+
+
+def per_ip_daily_limit(exempt: bool = False) -> int:
+    if not exempt:
+        return PER_IP_DAILY_LIMIT
+    if "WALLET_MCP_EXEMPT_IP_LIMIT" not in os.environ and _today_start() >= IP_LIMIT_DROP_DAY:
         return IP_LIMIT_AFTER_DROP
-    return PER_IP_DAILY_LIMIT
+    return EXEMPT_IP_DAILY_LIMIT
 
 
 def _conn() -> sqlite3.Connection:
@@ -123,7 +139,7 @@ def _today_start() -> str:
 CALLER_INFO_ERROR = "contact_email or x402_ready missing or invalid"
 
 
-def check_rate_limit(ip: str) -> str | None:
+def check_rate_limit(ip: str, exempt: bool = False) -> str | None:
     """Returns an error string if the caller should be rejected, else None."""
     today = _today_start()
     with _lock, _conn() as conn:
@@ -138,9 +154,9 @@ def check_rate_limit(ip: str) -> str | None:
             "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND COALESCE(error, '') NOT LIKE ?",
             (today, ip, CALLER_INFO_ERROR + "%"),
         ).fetchone()
-        limit = per_ip_daily_limit()
+        limit = per_ip_daily_limit(exempt)
         if ip_count >= limit:
-            return IP_LIMIT_ERROR.format(limit)
+            return IP_LIMIT_ERROR.format(limit, "pass" if limit == 1 else "passes", "it" if limit == 1 else "them")
     return None
 
 

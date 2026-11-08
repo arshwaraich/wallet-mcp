@@ -66,7 +66,7 @@ def payment_required(resource_url: str, message: str) -> dict:
 
     server, requirements = _resource_server()
     body = server.create_payment_required_response(
-        requirements, ResourceInfo(url=resource_url, description=f"one Wallet pass past the free limit, {PRICE}"),
+        requirements, ResourceInfo(url=resource_url, description=f"one Wallet pass after the free first one of the day, {PRICE}"),
         message,
     )
     return body.model_dump(by_alias=True, exclude_none=True)
