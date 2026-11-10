@@ -232,6 +232,13 @@ def public_stats() -> dict:
     return {"passes": row["total"] or 0, "passes_7d": row["week"] or 0, "last_pass": row["last"]}
 
 
+def free_remaining(ip: str, contact_email: str | None = None) -> int:
+    """Free passes this caller has left today (same keying as check_rate_limit)."""
+    with _conn() as conn:
+        used = _caller_count(conn, _today_start(), ip, contact_email, "success = 1")
+    return per_ip_daily_limit(is_exempt(contact_email)) - used
+
+
 def check_paid_limit(ip: str) -> str | None:
     """Returns an error string if the caller can't buy another call today, else None."""
     today = _today_start()
