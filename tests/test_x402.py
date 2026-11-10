@@ -141,6 +141,9 @@ def offline_tests():
               r.status_code == r2.status_code == 200 and "payment" not in r2.json() and not seen, r2.text)
         check("x402_ready=False gets the setup hint", r2.json().get("x402_setup", {}).get("guide")
               == "https://walletmcppass.com/#wallet-setup", r2.text)
+        check("hint says how many free passes are left", r.json().get("free_passes_left_today") == 1
+              and r.json()["x402_setup"]["message"].startswith("1 free pass left today.")
+              and r2.json()["x402_setup"]["message"].startswith("That was the last free pass today."), r.text)
 
         # --- REST ---
         r = httpx.post(f"{base}/api/passes", json=PASS)
@@ -222,7 +225,7 @@ def offline_tests():
 
         res = asyncio.run(mcp_call(base, "create_wallet_pass", PASS, meta={"x402/payment": sign(pr)}))
         check("MCP paid call -> pass", not res.is_error and "download_url" in (res.structured_content or {}), res)
-        check("MCP result carries the setup hint", "x402_setup" in (res.structured_content or {}), res)
+        check("paid MCP result carries no setup hint", "x402_setup" not in (res.structured_content or {}), res)
         res = asyncio.run(mcp_call(base, "create_wallet_pass", {**PASS, "x402_ready": True},
                                    meta={"x402/payment": sign(pr)}))
         check("x402_ready=True gets no setup hint", not res.is_error and "x402_setup" not in res.structured_content, res)
