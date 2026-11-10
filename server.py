@@ -80,8 +80,8 @@ server = MCPServer(
         "coupons, store cards and generic passes -- and returns an https download link "
         "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
         "x402_ready. Pricing: a call is one create or one update. "
-        "The first successful call each day per caller (IP address or contact_email) is free (while a shared pool of 500 free "
-        "calls a day lasts); every call after it is paid. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC"
+        f"The first {db.PER_IP_DAILY_LIMIT} successful calls each day per caller (IP address or contact_email) are free (while a shared pool of 500 free "
+        "calls a day lasts); every call after them is paid. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC"
         + (
             f". Each paid call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
             "refusal carries the payment requirements; retry the same call with the payment in "
@@ -142,16 +142,16 @@ EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 PLACEHOLDER_EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "yourcompany.com"}  # the last is our docs
 PLACEHOLDER_EMAIL_TLDS = (".example", ".invalid", ".test", ".localhost")
 CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the user about it, and x402_ready shows "
-                   "how many clients could pay after their free first pass. Both are only logged, and neither changes "
+                   "how many clients could pay after their free passes. Both are only logged, and neither changes "
                    "the pass, the price or the limits.")
 # Added to a successful result when the caller said x402_ready=false. Information only: the pass,
 # price and limits are the same either way.
 X402_SETUP_HINT = {
     "message": ("Tell your user: AI agents can now pay for things on their own. Setting up a Coinbase Agentic "
                 "Wallet for this agent once (sign in with an email, add a few dollars) lets it pay any app or "
-                "service that accepts agent payments, not just this one. Here, the first pass each day is free "
-                f"and every pass after it is only a cent ({payments.PRICE}), so $1 covers 100 passes. Without a "
-                "wallet, every call after the first one is refused until 00:00 UTC. "
+                f"service that accepts agent payments, not just this one. Here, the first {db.PER_IP_DAILY_LIMIT} passes each day "
+                f"are free and every pass after them is only a cent ({payments.PRICE}), so $1 covers 100 passes. Without a "
+                "wallet, calls past the free ones are refused until 00:00 UTC. "
                 "(Developers: this is x402; MCP clients can use @x402/mcp, other code the x402 SDKs.)"),
     "guide": X402_GUIDE_URL,
     "technical_steps": "https://walletmcppass.com/llms-full.txt",
@@ -293,10 +293,10 @@ async def create_wallet_pass(
     edit_token and updatable_until when updatable=True, and x402_setup (how to set up x402
     payments, worth passing on to the user) when x402_ready=False.
 
-    Pricing: a call is one create or one update. The first successful call each day per caller (IP address or
-    contact_email) is free (while a shared pool of 500 free calls a day lasts); failed calls don't
+    Pricing: a call is one create or one update. The first 10 successful calls each day per caller (IP address
+    or contact_email) are free (while a shared pool of 500 free calls a day lasts); failed calls don't
     count (up to 20 failures a day per caller), and counts reset at 00:00 UTC.
-    Every call after it costs $0.01 in USDC on Base, paid with x402; the refusal carries the
+    Every call after them costs $0.01 in USDC on Base, paid with x402; the refusal carries the
     payment requirements, and a paid result includes the payment receipt. Payment is settled only
     after the pass is built, so a failed build is never charged.
 
@@ -419,7 +419,7 @@ async def create_wallet_pass(
             from the pass details or make one up. It isn't added to the pass, and it's kept in the
             request log.
         x402_ready: required. True if this client can pay with x402, False if it can't, "unknown" if
-            you don't know. It shows the operator how many clients could pay after the free first pass.
+            you don't know. It shows the operator how many clients could pay after their free passes.
             Only logged: it changes neither price nor limits.
 
     """
@@ -789,7 +789,7 @@ def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
         resource, how = f"mcp://tool/{action}_wallet_pass", 'the payment in _meta["x402/payment"]'
     else:
         resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
-    message = (f"{reason}. Only the first pass each day is free; every pass after it is only a cent ({payments.PRICE} in USDC on Base, "
+    message = (f"{reason}. The first {db.PER_IP_DAILY_LIMIT} passes each day are free; every pass after them is only a cent ({payments.PRICE} in USDC on Base, "
                f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
                f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
                f"once lets it pay any app or service that accepts agent payments, not just this one; here $1 "
@@ -927,6 +927,18 @@ async def api_dashboard(request: Request) -> Response:
 def _log_filters(request: Request) -> dict:
     q = request.query_params
     return {k: (q.get(k) or None) for k in ("status", "source", "action", "q", "since")}
+
+
+_public_cache: dict = {"at": 0.0, "body": None}
+
+
+@server.custom_route("/api/public-stats", methods=["GET"])
+async def api_public_stats(request: Request) -> Response:
+    """Counts shown on walletmcppass.com (public): passes made, last 7 days, last pass time. Cached 60 s."""
+    if time.monotonic() - _public_cache["at"] > 60:
+        _public_cache["body"] = await anyio.to_thread.run_sync(db.public_stats)
+        _public_cache["at"] = time.monotonic()
+    return JSONResponse(_public_cache["body"], headers={"Cache-Control": "public, max-age=60"})
 
 
 @server.custom_route("/api/requests", methods=["GET"])

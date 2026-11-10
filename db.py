@@ -14,8 +14,9 @@ DB_PATH.parent.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
 
-# Free calls a day per caller IP: the first pass is free, everything after it is paid (2026-11-08).
-PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 1))
+# Free successful calls a day per caller (IP or contact_email); every call after them is paid.
+# Was 1 from 2026-11-08 to 2026-11-10: usage fell ~75% and nobody paid, so it went back up to 10.
+PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 10))
 # Exempt callers (contact_email listed in EXEMPT_FILE, one per line, not in git) keep the old free
 # limit: 30 a day, dropping to 20 on IP_LIMIT_DROP_DAY (UTC). WALLET_MCP_EXEMPT_IP_LIMIT pins it.
 EXEMPT_FILE = Path(os.environ.get("WALLET_MCP_EXEMPT_FILE", DB_PATH.parent / "free_exempt.txt"))
@@ -214,6 +215,21 @@ def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = 
         if used >= limit:
             return IP_LIMIT_ERROR.format(limit, "pass" if limit == 1 else "passes", "it" if limit == 1 else "them")
     return None
+
+
+OWN_IPS = ("149.56.100.54",)  # the VPS itself: our own test calls
+
+
+def public_stats() -> dict:
+    """Aggregate counts for the public landing page: no emails, IPs or pass contents."""
+    with _conn() as conn:
+        row = conn.execute(
+            f"""SELECT COUNT(*) total,
+                      SUM(ts >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-7 days')) week,
+                      MAX(ts) last
+               FROM requests WHERE success = 1 AND action = 'create'
+                 AND ip NOT IN ({','.join('?' * len(OWN_IPS))})""", OWN_IPS).fetchone()
+    return {"passes": row["total"] or 0, "passes_7d": row["week"] or 0, "last_pass": row["last"]}
 
 
 def check_paid_limit(ip: str) -> str | None:
