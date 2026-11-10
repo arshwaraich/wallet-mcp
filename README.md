@@ -7,7 +7,7 @@ Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wal
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key, just a contact email on each call |
-| Price | The first successful call (create or update) each day per caller (IP address or `contact_email`) is free; failed calls don't count; every call after it is $0.01 in USDC on Base, paid with [x402](#paying-with-x402) |
+| Price | The first 10 successful calls (creates or updates) each day per caller (IP address or `contact_email`) are free; failed calls don't count; every call after them is $0.01 in USDC on Base, paid with [x402](#paying-with-x402) |
 | Limits | 500 free calls a day in total; paid: 1,000 a day per IP, 10,000 in total; passes up to 10 MB |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
@@ -227,8 +227,8 @@ Both tools and the REST API also require two inputs that are only logged, as `re
 
 Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
 
-- **MCP**: the refused call is a tool error whose `structuredContent` is an x402 v2 `PaymentRequired` (resource `mcp://tool/create_wallet_pass` or `update_wallet_pass`). The client retries the same call with the signed payment in `_meta["x402/payment"]`. The result then carries the receipt in `_meta["x402/payment-response"]` and as a `payment` key.
-- **REST**: a 402 with the `PaymentRequired` body and `PAYMENT-REQUIRED` header. The client retries with a `PAYMENT-SIGNATURE` (or legacy `X-PAYMENT`) header and gets the receipt in `PAYMENT-RESPONSE` and as `payment`.
+- **MCP**: the refused call is a tool error whose `structuredContent` is an x402 v2 `PaymentRequired` (resource `mcp://tool/create_wallet_pass` or `update_wallet_pass`). The client retries the same call with the signed payment in the `x402_payment` argument (a `PaymentPayload` object or its base64) or in `_meta["x402/payment"]`. The argument exists for chat apps such as Claude.ai and ChatGPT: there the model fills in tool arguments but can't set `_meta`, so a payment signed by a wallet connector can only reach the server as an argument. If both are sent, `_meta` wins. The result then carries the receipt in `_meta["x402/payment-response"]` and as a `payment` key.
+- **REST**: a 402 with the `PaymentRequired` body and `PAYMENT-REQUIRED` header. The client retries with a `PAYMENT-SIGNATURE` (or legacy `X-PAYMENT`) header, or an `x402_payment` field in the JSON body, and gets the receipt in `PAYMENT-RESPONSE` and as `payment`.
 
 The facilitator verifies the payment before any work. It settles it on-chain after the pass is built but before the pass is handed over, stored or pushed. So a failed build is never charged, and a failed settlement (402 again) gets nothing and changes nothing. Payments sent while under the limit are ignored, not charged. Each settled call is logged with its `payment_tx`. The server never holds a key; the USDC goes straight to the payout address.
 

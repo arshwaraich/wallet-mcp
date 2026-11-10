@@ -167,6 +167,9 @@ def offline_tests():
         check("facilitator got verify then settle", [p for p, _ in seen[-2:]] == ["/verify", "/settle"], seen)
         check("paid call logged with its transaction", rows()[-1] == ("create", 1, None, 1, "0xfeed"), rows()[-1])
         check("download link of a paid pass works", httpx.get(r.json()["download_url"]).status_code == 200)
+        r = httpx.post(f"{base}/api/passes", json={**PASS, "x402_payment": sign(body)})
+        check("REST paid via x402_payment body field -> 200",
+              r.status_code == 200 and r.json().get("payment", {}).get("transaction") == "0xfeed", r.text)
 
         r = httpx.post(f"{base}/api/passes", json=PASS, headers={"x-payment": header(sign(body))})
         check("legacy X-PAYMENT header also accepted", r.status_code == 200 and "payment" in r.json(), r.text)
@@ -219,9 +222,23 @@ def offline_tests():
         pr = res.structured_content or {}
         check("MCP past the limit -> tool error carrying PaymentRequired",
               res.is_error and pr.get("x402Version") == 2 and pr["accepts"][0]["amount"] == "10000", res)
-        check("MCP refusal names the _meta key and the tool resource",
-              'x402/payment' in pr.get("error", "") and pr["resource"]["url"] == "mcp://tool/create_wallet_pass", pr)
+        check("MCP refusal names the x402_payment argument and the tool resource",
+              'x402_payment' in pr.get("error", "") and pr["resource"]["url"] == "mcp://tool/create_wallet_pass", pr)
         check("MCP refusal text is the same JSON", json.loads(res.content[0].text) == pr)
+
+        # Chat apps can only fill in arguments, so the payment can also come as x402_payment.
+        res = asyncio.run(mcp_call(base, "create_wallet_pass", {**PASS, "x402_payment": sign(pr)}))
+        check("MCP paid via x402_payment argument (object) -> pass",
+              not res.is_error and res.structured_content["payment"]["transaction"] == "0xfeed", res)
+        res = asyncio.run(mcp_call(base, "create_wallet_pass", {**PASS, "x402_payment": header(sign(pr))}))
+        check("MCP paid via x402_payment argument (base64) -> pass",
+              not res.is_error and "download_url" in res.structured_content, res)
+        res = asyncio.run(mcp_call(base, "create_wallet_pass", {**PASS, "x402_payment": "garbage"}))
+        check("MCP unreadable x402_payment -> PaymentRequired again",
+              res.is_error and (res.structured_content or {}).get("x402Version") == 2, res)
+        with sqlite3.connect(db_path) as c:
+            row = c.execute("SELECT x402, payment_tx FROM requests WHERE success=1 ORDER BY id DESC LIMIT 1").fetchone()
+        check("argument payment logged as x402=1 with its tx", row == (1, "0xfeed"), row)
 
         res = asyncio.run(mcp_call(base, "create_wallet_pass", PASS, meta={"x402/payment": sign(pr)}))
         check("MCP paid call -> pass", not res.is_error and "download_url" in (res.structured_content or {}), res)
@@ -242,6 +259,11 @@ def offline_tests():
                                    meta={"x402/payment": sign(pr)}))
         check("MCP paid update -> ok", not res.is_error and res.structured_content["payment"]["transaction"] == "0xfeed",
               res)
+        res = asyncio.run(mcp_call(base, "update_wallet_pass", {"serial_number": serial, "edit_token": edit_token,
+                                                                "organization_name": "Thrice", **CALLER,
+                                                                "x402_payment": sign(pr)}))
+        check("MCP paid update via x402_payment argument -> ok",
+              not res.is_error and res.structured_content["payment"]["transaction"] == "0xfeed", res)
     finally:
         proc.terminate()
         proc.wait()

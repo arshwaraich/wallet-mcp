@@ -84,8 +84,8 @@ server = MCPServer(
         "calls a day lasts); every call after them is paid. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC"
         + (
             f". Each paid call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
-            "refusal carries the payment requirements; retry the same call with the payment in "
-            '_meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
+            "refusal carries the payment requirements; retry the same call with the signed payment in the "
+            'x402_payment argument, or in _meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
             "build is never charged. Setup guide: https://walletmcppass.com/#wallet-setup. Without x402, wait for the reset"
             if payments.enabled else ""
         )
@@ -201,6 +201,15 @@ class Caller:
         )
 
 
+    def with_payment_argument(self, payment) -> "Caller":
+        """The x402_payment tool argument / JSON body field. It exists because chat apps (Claude.ai,
+        ChatGPT) let the model fill in arguments but not _meta or headers, so a payment signed by a
+        wallet connector can only reach us this way. A _meta/header payment wins if both are sent."""
+        if payment is None or self.payment is not None:
+            return self
+        return replace(self, payment=payment, x402=True)
+
+
 def _log(caller: Caller, **fields) -> None:
     fields.setdefault("payment_tx", None)
     db.log_request(ip=caller.ip, source=caller.source, client=caller.client, x402=caller.x402,
@@ -266,6 +275,7 @@ async def create_wallet_pass(
     updatable_hours: int = 1,
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
+    x402_payment: dict | str | None = None,
 ) -> dict:
     """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
 
@@ -299,8 +309,9 @@ async def create_wallet_pass(
     Pricing: a call is one create or one update. The first 10 successful calls each day per caller (IP address
     or contact_email) are free (while a shared pool of 500 free calls a day lasts); failed calls don't
     count (up to 20 failures a day per caller), and counts reset at 00:00 UTC.
-    Every call after them costs $0.01 in USDC on Base, paid with x402; the refusal carries the
-    payment requirements, and a paid result includes the payment receipt. Payment is settled only
+    Every call after them costs $0.01 in USDC on Base, paid with x402: the refusal carries the
+    payment requirements; have the user's wallet tool sign them and retry the same call with the
+    result as x402_payment. A paid result includes the payment receipt. Payment is settled only
     after the pass is built, so a failed build is never charged.
 
     Args:
@@ -424,6 +435,9 @@ async def create_wallet_pass(
         x402_ready: required. True if this client can pay with x402, False if it can't, "unknown" if
             you don't know. It shows the operator how many clients could pay after their free passes.
             Only logged: it changes neither price nor limits.
+        x402_payment: only after a refusal that asked for payment. The signed x402 payment for the
+            requirements in that refusal (the PaymentPayload JSON object, or its base64), e.g. from
+            a wallet connector's sign/pay tool. Same as sending it in _meta["x402/payment"].
 
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
@@ -489,11 +503,12 @@ async def update_wallet_pass(
     max_distance: float | None = None,
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
+    x402_payment: dict | str | None = None,
 ) -> dict:
     """Change a pass made with create_wallet_pass(updatable=True); every iPhone that added it refreshes.
 
     Takes the serial_number and edit_token returned when the pass was created, the required
-    contact_email and x402_ready, plus any of create_wallet_pass's parameters, with the same meanings. Each parameter given replaces the
+    contact_email and x402_ready, plus any of create_wallet_pass's parameters (x402_payment included), with the same meanings. Each parameter given replaces the
     stored value completely (a fields list replaces the whole list, so resend unchanged fields
     too); parameters left out keep their current values. Clear a text value with "" and a list
     with []. To cancel a pass, set voided=True: Wallet marks it void on every iPhone.
@@ -596,11 +611,14 @@ def _create_pass(
     updatable_hours: int = 1,
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
+    x402_payment: dict | str | None = None,
 ) -> dict:
     """Rate-limit, build, sign and log one pass."""
     params = {k: v for k, v in locals().items()
-              if k not in ("caller", "serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready")}
+              if k not in ("caller", "serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready",
+                           "x402_payment")}
     start = time.monotonic()
+    caller = caller.with_payment_argument(x402_payment)
     caller = _with_caller_info(caller, contact_email, x402_ready, "create", style, organization_name)
     paid = _check_rate_limit(caller, "create", style, organization_name)
 
@@ -705,6 +723,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         raise PassRejected(
             "unknown serial_number, wrong edit_token, or the pass's update window (updatable_hours) has ended", 404)
     contact_email, x402_ready = changes.pop("contact_email"), changes.pop("x402_ready")
+    caller = caller.with_payment_argument(changes.pop("x402_payment", None))
     params = json.loads(row["params"])
     changes = {k: v for k, v in changes.items() if v is not None}
     if not changes:
@@ -797,9 +816,9 @@ def _check_rate_limit(caller: Caller, action: str, style: str, organization_name
 def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
     """A 402 offering to do the call for a price; a plain 429 if the facilitator can't be reached."""
     if caller.source == "mcp":
-        resource, how = f"mcp://tool/{action}_wallet_pass", 'the payment in _meta["x402/payment"]'
+        resource, how = f"mcp://tool/{action}_wallet_pass", "the signed payment as the x402_payment argument"
     else:
-        resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header"
+        resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header or an x402_payment body field"
     message = (f"{reason}. The first {db.PER_IP_DAILY_LIMIT} passes each day are free; every pass after them is only a cent ({payments.PRICE} in USDC on Base, "
                f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
                f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
