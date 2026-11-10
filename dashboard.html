@@ -2,8 +2,9 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#121211">
 <title>wallet-mcp · vps.arshw.com</title>
 <style>
 :root{
@@ -18,191 +19,219 @@
 html,body{margin:0;padding:0}
 body{background:var(--bg); color:var(--text-primary);
   font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  -webkit-font-smoothing:antialiased; min-height:100vh}
-main{width:100%; max-width:1180px; margin:0 auto; padding:40px 22px 60px}
-header{margin-bottom:22px; display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap}
+  -webkit-font-smoothing:antialiased; min-height:100vh; -webkit-text-size-adjust:100%}
+button,input,select{font:inherit}
+main{width:100%; max-width:1180px; margin:0 auto; padding:28px 20px 60px}
+
+header{display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:18px}
 h1{margin:0; font-size:22px; font-weight:600; letter-spacing:-.015em}
 h1 .dot{color:var(--accent)} h1 a{color:inherit; text-decoration:none}
-header p{margin:6px 0 0; color:var(--text-muted); font-size:13px}
-.controls{display:flex; gap:10px; align-items:center; flex-wrap:wrap; color:var(--text-muted); font-size:12.5px}
+#refresh{color:var(--text-muted); font-size:12.5px}
 
-nav.jump{display:flex; gap:6px; flex-wrap:wrap; margin:0 0 24px}
-nav.jump a{color:var(--text-secondary); text-decoration:none; font-size:12.5px; padding:4px 10px; border:1px solid var(--line); border-radius:999px}
-nav.jump a:hover{color:var(--text-primary); border-color:var(--text-muted)}
+/* tabs: sticky, one view at a time */
+nav.tabs{position:sticky; top:0; z-index:5; background:var(--bg); margin:0 -20px 24px; padding:10px 20px;
+  border-bottom:1px solid var(--line); display:flex; gap:6px}
+nav.tabs a{flex:1; text-align:center; color:var(--text-secondary); text-decoration:none; font-size:14px;
+  padding:9px 6px; border-radius:10px; white-space:nowrap}
+nav.tabs a.on{background:var(--surface-2); color:var(--text-primary); font-weight:600}
+@media (min-width:760px){ nav.tabs a{flex:none; padding:8px 18px} }
+.view{display:none} .view.on{display:block}
 
-.tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:12px}
-@media (max-width:600px){ .tiles{grid-template-columns:1fr 1fr} }
-.tile{background:var(--surface-1); border:1px solid var(--line); border-radius:12px; padding:14px 16px; min-width:0}
-.tile .label{color:var(--text-muted); font-size:11.5px; letter-spacing:.05em; text-transform:uppercase}
-.tile .value{margin-top:6px; font-size:26px; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.02em}
-.tile .sub{margin-top:2px; color:var(--text-secondary); font-size:12.5px; font-variant-numeric:tabular-nums}
+section{margin-bottom:40px}
+h2{font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin:0 0 14px; font-weight:600;
+  display:flex; gap:10px; align-items:baseline; flex-wrap:wrap}
+h2 .count{text-transform:none; letter-spacing:0; font-weight:400}
 
-section{margin-bottom:36px; scroll-margin-top:12px}
-section h2{font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin:0 0 12px; display:flex; gap:10px; align-items:baseline; flex-wrap:wrap}
-section h2 .count{text-transform:none; letter-spacing:0; font-weight:400}
-.grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr)); gap:28px}
+.tiles{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px}
+@media (max-width:760px){ .tiles{grid-template-columns:1fr 1fr} }
+.tile{background:var(--surface-1); border:1px solid var(--line); border-radius:14px; padding:16px; min-width:0}
+.tile .label{color:var(--text-muted); font-size:12px; letter-spacing:.04em; text-transform:uppercase}
+.tile .value{margin-top:6px; font-size:28px; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.02em; line-height:1.15}
+.tile .sub{margin-top:4px; color:var(--text-secondary); font-size:13px; font-variant-numeric:tabular-nums}
+
+/* segmented controls / chips: one row, swipe sideways if needed */
+.seg-row{display:flex; gap:8px; overflow-x:auto; scrollbar-width:none; margin:0 -20px 14px; padding:0 20px}
+.seg-row::-webkit-scrollbar{display:none}
+.chip{flex:none; background:none; border:1px solid var(--line); color:var(--text-secondary); border-radius:999px;
+  padding:7px 14px; font-size:13.5px; cursor:pointer; white-space:nowrap}
+.chip.on{background:var(--text-primary); color:var(--bg); border-color:var(--text-primary); font-weight:600}
 
 /* daily chart */
-.legend{display:flex; gap:14px; flex-wrap:wrap; font-size:12.5px; color:var(--text-secondary); margin-bottom:10px}
+.legend{display:flex; gap:8px 16px; flex-wrap:wrap; font-size:13px; color:var(--text-secondary); margin-bottom:12px}
 .legend i{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px}
-.chart{position:relative; display:flex; align-items:flex-end; gap:2px; height:180px; padding-top:8px; border-bottom:1px solid var(--line)}
-.chart .col{flex:1; min-width:3px; height:100%; display:flex; flex-direction:column-reverse; gap:2px; cursor:default}
-.chart .col:hover{background:var(--surface-2)}
+.chart{position:relative; display:flex; align-items:flex-end; gap:2px; height:180px; border-bottom:1px solid var(--line); touch-action:pan-y}
+.chart .col{flex:1; min-width:2px; height:100%; display:flex; flex-direction:column-reverse; gap:2px; cursor:pointer; border-radius:4px 4px 0 0}
+.chart .col.sel{background:var(--surface-2)}
 .chart .seg{width:100%; flex:none}
 .chart .col .seg:last-child{border-radius:4px 4px 0 0}
-.axis{display:flex; justify-content:space-between; color:var(--text-muted); font-size:11.5px; margin-top:4px; font-variant-numeric:tabular-nums}
-#tip{position:fixed; pointer-events:none; background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12.5px; color:var(--text-secondary); display:none; z-index:10; font-variant-numeric:tabular-nums; white-space:nowrap}
-#tip b{color:var(--text-primary)}
-#tip i{display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:6px}
-details.tableview{margin-top:10px} details.tableview summary{cursor:pointer; color:var(--text-muted); font-size:12.5px}
+.axis{display:flex; justify-content:space-between; color:var(--text-muted); font-size:12px; margin-top:6px; font-variant-numeric:tabular-nums}
+.daycard{margin-top:16px; background:var(--surface-1); border:1px solid var(--line); border-radius:14px; padding:14px 16px}
+.daycard .top{display:flex; justify-content:space-between; gap:4px 10px; align-items:baseline; flex-wrap:wrap}
+.daycard .top b{font-size:15px}
+.daycard .top span{color:var(--text-muted); font-size:13px}
+.daycard ul{list-style:none; margin:10px 0 0; padding:0; display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; font-size:13.5px; color:var(--text-secondary)}
+.daycard li{display:flex; justify-content:space-between; gap:8px; min-width:0}
+.daycard li span:first-child{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.daycard li b{color:var(--text-primary); font-variant-numeric:tabular-nums; font-weight:600}
+.daycard i{display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:7px}
+@media (max-width:420px){ .daycard ul{grid-template-columns:1fr} }
+.hint{color:var(--text-muted); font-size:12.5px; margin-top:8px}
 
-.bars{display:flex; flex-direction:column; gap:7px}
-.barrow{display:flex; align-items:center; gap:10px; font-size:13px}
-.barrow .name{width:120px; flex:none; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.barrow .track{flex:1; height:8px; background:var(--surface-2); border-radius:4px; overflow:hidden}
+.bars{display:flex; flex-direction:column; gap:10px}
+.barrow{display:grid; grid-template-columns:minmax(0,9em) 1fr auto; align-items:center; gap:12px; font-size:13.5px}
+.barrow .name{color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.barrow .track{height:8px; background:var(--surface-2); border-radius:4px; overflow:hidden}
 .barrow .track > i{display:block; height:100%; background:var(--accent); border-radius:4px}
-.barrow .count{width:96px; text-align:right; color:var(--text-muted); font-variant-numeric:tabular-nums; font-size:12.5px}
+.barrow .count{text-align:right; color:var(--text-muted); font-variant-numeric:tabular-nums; font-size:13px}
+.grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr)); gap:40px}
 
-.table-wrap{overflow:auto; max-height:560px; border:1px solid var(--line); border-radius:10px}
-.table-wrap.tall{max-height:75vh}
-table{width:100%; border-collapse:collapse; font-size:12.5px}
-th{position:sticky; top:0; background:var(--surface-1); text-align:left; color:var(--text-muted); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.04em; padding:7px 10px; border-bottom:1px solid var(--line); white-space:nowrap; z-index:1}
+/* filters */
+.filters{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px}
+input[type=search], select{background:var(--surface-1); border:1px solid var(--line); color:var(--text-primary);
+  border-radius:10px; padding:9px 12px; font-size:16px; max-width:100%; min-width:0}
+input[type=search]{flex:1 1 100%}
+.filters select{flex:1}
+@media (min-width:760px){ input[type=search]{flex:1 1 240px; font-size:14px} select{font-size:14px} .filters select{flex:none} }
+.btn{background:var(--surface-2); border:1px solid var(--line); color:var(--text-primary); border-radius:10px; padding:9px 14px;
+  font-size:14px; cursor:pointer; text-decoration:none; display:inline-block}
+.below{display:flex; gap:10px; align-items:center; margin-top:16px; color:var(--text-muted); font-size:13px; flex-wrap:wrap}
+
+/* lists: cards on phones, tables on wide screens */
+.cards{display:flex; flex-direction:column; border:1px solid var(--line); border-radius:14px; overflow:hidden}
+.card{padding:14px 16px; border-bottom:1px solid var(--line); min-width:0}
+.card:last-child{border-bottom:none}
+.card .l1{display:flex; align-items:baseline; gap:10px; min-width:0}
+.card .t{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary); font-size:14.5px}
+.card .r{flex:none; color:var(--text-secondary); font-variant-numeric:tabular-nums; font-size:13.5px}
+.card .l2{margin-top:3px; color:var(--text-muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.card .l3{margin-top:6px; color:var(--text-secondary); font-size:13px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere}
+.card.tap{cursor:pointer}
+.card dl{display:none; margin:12px 0 2px; grid-template-columns:max-content minmax(0,1fr); gap:6px 14px; font-size:13px}
+.card.open dl{display:grid}
+.card.open .l3{-webkit-line-clamp:unset}
+.card dt{color:var(--text-muted)} .card dd{margin:0; color:var(--text-secondary); overflow-wrap:anywhere}
+.empty{color:var(--text-muted); font-size:14px; padding:16px}
+
+.table-wrap{overflow:auto; max-height:75vh; border:1px solid var(--line); border-radius:12px}
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{position:sticky; top:0; background:var(--surface-1); text-align:left; color:var(--text-muted); font-weight:500; font-size:11px;
+  text-transform:uppercase; letter-spacing:.04em; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; z-index:1}
 th[data-k]{cursor:pointer; user-select:none} th[data-k]:hover{color:var(--text-primary)}
 th.sorted::after{content:" ↓"} th.sorted.asc::after{content:" ↑"}
-td{padding:6px 10px; border-bottom:1px solid var(--line); color:var(--text-secondary); font-variant-numeric:tabular-nums; white-space:nowrap; vertical-align:top}
+td{padding:7px 10px; border-bottom:1px solid var(--line); color:var(--text-secondary); font-variant-numeric:tabular-nums; white-space:nowrap; vertical-align:top}
 td.wrap{white-space:normal; min-width:220px; max-width:420px}
 td.err{max-width:360px; overflow:hidden; text-overflow:ellipsis}
 td.num,th.num{text-align:right}
 tr:last-child td{border-bottom:none}
 tbody tr:hover td{background:var(--surface-1)}
-.ok{color:var(--up)} .fail{color:var(--down)} .paid{color:var(--s-paid); font-weight:600} .lim{color:var(--accent)}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px}
-.empty{color:var(--text-muted); font-size:13px; padding:10px}
 
-.filters{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px}
-.chip{background:none; border:1px solid var(--line); color:var(--text-secondary); border-radius:999px; padding:4px 11px; font:inherit; font-size:12.5px; cursor:pointer}
-.chip.on{background:var(--text-primary); color:var(--bg); border-color:var(--text-primary)}
-input[type=search], select{background:var(--surface-1); border:1px solid var(--line); color:var(--text-primary); border-radius:8px; padding:6px 10px; font:inherit; font-size:13px; max-width:100%}
-input[type=search]{flex:1; min-width:180px}
-.btn{background:var(--surface-2); border:1px solid var(--line); color:var(--text-primary); border-radius:8px; padding:6px 12px; font:inherit; font-size:13px; cursor:pointer; text-decoration:none; display:inline-block}
-.btn:hover{border-color:var(--text-muted)}
-.below{display:flex; gap:10px; align-items:center; margin-top:10px; color:var(--text-muted); font-size:12.5px; flex-wrap:wrap}
-.kv{display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; font-size:13px; color:var(--text-secondary)}
+.badge{display:inline-block; font-size:12px; font-weight:600; padding:0 8px; border-radius:999px; border:1px solid currentColor; line-height:1.6; flex:none}
+.ok{color:var(--up)} .fail{color:var(--down)} .paid{color:var(--s-paid)} .lim{color:var(--accent)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px}
+a.q{color:var(--link); text-decoration:none} a.q:hover{text-decoration:underline}
+
+.kv{display:grid; grid-template-columns:max-content 1fr; gap:8px 18px; font-size:14px; color:var(--text-secondary); margin:0}
 .kv dt{color:var(--text-muted)} .kv dd{margin:0; min-width:0; overflow-wrap:anywhere}
-@media (max-width:520px){ .kv{grid-template-columns:1fr} .kv dd{margin-bottom:8px} }
-a.ip{color:var(--link); text-decoration:none} a.ip:hover{text-decoration:underline}
-footer{max-width:1180px; margin:0 auto; padding:0 22px 40px; color:var(--text-muted); font-size:12.5px}
-footer hr{border:none; border-top:1px solid var(--line); margin:0 0 14px}
+@media (max-width:520px){ .kv{grid-template-columns:1fr; gap:2px} .kv dd{margin-bottom:12px} }
+details.tableview{margin-top:14px} details.tableview summary{cursor:pointer; color:var(--text-muted); font-size:13px}
+footer{max-width:1180px; margin:0 auto; padding:0 20px 40px; color:var(--text-muted); font-size:13px}
 footer a{color:var(--link); text-decoration:none}
 </style>
 </head>
 <body>
 <main>
   <header>
-    <div>
-      <h1><a href="/">vps.arshw.com</a><span class="dot">.</span> wallet-mcp</h1>
-      <p>Apple Wallet pass signing MCP server: every request, payment, caller and error</p>
-    </div>
-    <div class="controls">
-      <label>Range <select id="days">
-        <option value="7">7 days</option><option value="30" selected>30 days</option>
-        <option value="90">90 days</option><option value="366">1 year</option>
-      </select></label>
-      <span id="refresh"></span>
-    </div>
+    <h1><a href="/">vps</a><span class="dot">.</span> wallet-mcp</h1>
+    <span id="refresh"></span>
   </header>
 
-  <nav class="jump">
-    <a href="#overview">Overview</a><a href="#daily">Daily</a><a href="#log">Request log</a>
-    <a href="#payments">Payments</a><a href="#contacts">Contacts</a><a href="#clients">Clients</a>
-    <a href="#ips">IPs</a><a href="#errors">Errors</a><a href="#breakdown">Breakdown</a>
-    <a href="#site">Website</a><a href="#limits">Limits</a>
+  <nav class="tabs" id="tabs">
+    <a href="#overview" data-v="overview">Overview</a>
+    <a href="#log" data-v="log">Log</a>
+    <a href="#callers" data-v="callers">Callers</a>
+    <a href="#site" data-v="site">Site</a>
   </nav>
 
-  <section id="overview">
-    <div class="tiles" id="tiles"></div>
-  </section>
+  <!-- OVERVIEW -->
+  <div class="view" id="v-overview">
+    <section><div class="tiles" id="tiles"></div></section>
 
-  <section id="daily">
-    <h2>Requests per day <span class="count" id="daily-range"></span></h2>
-    <div class="legend" id="legend"></div>
-    <div class="chart" id="chart"></div>
-    <div class="axis"><span id="axis-start"></span><span id="axis-end"></span></div>
-    <details class="tableview"><summary>Table view</summary>
-      <div class="table-wrap" style="margin-top:8px"><table id="t-daily"></table></div>
-    </details>
-  </section>
+    <section>
+      <h2>Requests per day <span class="count">UTC</span></h2>
+      <div class="seg-row" id="range">
+        <button class="chip" data-d="7">7 days</button><button class="chip on" data-d="30">30 days</button>
+        <button class="chip" data-d="90">90 days</button><button class="chip" data-d="366">1 year</button>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="chart" id="chart"></div>
+      <div class="axis"><span id="axis-start"></span><span id="axis-end"></span></div>
+      <div class="daycard" id="daycard"></div>
+      <div class="hint">Tap or drag across the bars to pick a day.</div>
+      <details class="tableview"><summary>Table view</summary>
+        <div class="table-wrap" style="margin-top:10px"><table id="t-daily"></table></div>
+      </details>
+    </section>
 
-  <section id="log">
-    <h2>Request log <span class="count" id="log-count"></span></h2>
-    <div class="filters" id="status-chips"></div>
-    <div class="filters">
-      <input type="search" id="q" placeholder="Search IP, email, org, client, serial, error, tx…">
-      <select id="source"><option value="">MCP + API</option><option value="mcp">MCP</option><option value="api">API</option></select>
-      <select id="action"><option value="">create + update</option><option value="create">create</option><option value="update">update</option></select>
-    </div>
-    <div class="table-wrap tall"><table>
-      <thead><tr><th>#</th><th>Time (UTC)</th><th>Result</th><th>Via</th><th>Action</th><th>Style</th><th>Org</th><th>Email</th><th>x402 ready</th><th>Client</th><th>IP</th><th class="num">ms</th><th>Serial</th><th>Payment tx</th><th>Error</th></tr></thead>
-      <tbody id="log-rows"></tbody>
-    </table></div>
-    <div class="below">
-      <button class="btn" id="more">Load 200 more</button>
-      <button class="btn" id="all">Load all</button>
-      <a class="btn" id="csv" href="api/requests.csv">Download CSV (filtered)</a>
-      <span id="log-shown"></span>
-    </div>
-  </section>
+    <section><div class="tiles" id="tiles2"></div></section>
 
-  <section id="payments">
-    <h2>Payments <span class="count" id="pay-count"></span></h2>
-    <div class="table-wrap"><table id="t-payments"></table></div>
-  </section>
+    <section class="grid2">
+      <div><h2>By pass style</h2><div class="bars" id="by-style"></div></div>
+      <div><h2>By interface</h2><div class="bars" id="by-source"></div>
+           <h2 style="margin-top:28px">By action</h2><div class="bars" id="by-action"></div></div>
+    </section>
 
-  <section id="contacts">
-    <h2>Contacts <span class="count" id="contacts-count"></span></h2>
-    <div class="filters"><input type="search" id="contacts-q" placeholder="Filter emails…"></div>
-    <div class="table-wrap"><table id="t-contacts"></table></div>
-  </section>
+    <section>
+      <h2>Limits in force</h2>
+      <dl class="kv" id="limits-kv"></dl>
+    </section>
+  </div>
 
-  <section id="clients">
-    <h2>Clients <span class="count" id="clients-count"></span></h2>
-    <div class="filters"><input type="search" id="clients-q" placeholder="Filter clients…"></div>
-    <div class="table-wrap"><table id="t-clients"></table></div>
-  </section>
+  <!-- LOG -->
+  <div class="view" id="v-log">
+    <section>
+      <h2>Request log <span class="count" id="log-count"></span></h2>
+      <div class="seg-row" id="status-chips"></div>
+      <div class="filters">
+        <input type="search" id="q" placeholder="Search IP, email, org, client, error…" autocomplete="off" autocapitalize="off">
+        <select id="source"><option value="">MCP + API</option><option value="mcp">MCP</option><option value="api">API</option></select>
+        <select id="action"><option value="">create + update</option><option value="create">create</option><option value="update">update</option></select>
+      </div>
+      <div id="log-list"></div>
+      <div class="below">
+        <button class="btn" id="more">Load more</button>
+        <button class="btn" id="all">Load all</button>
+        <a class="btn" id="csv" href="api/requests.csv">CSV</a>
+        <span id="log-shown"></span>
+      </div>
+    </section>
+  </div>
 
-  <section id="ips">
-    <h2>IPs <span class="count" id="ips-count"></span></h2>
-    <div class="filters"><input type="search" id="ips-q" placeholder="Filter IPs…"></div>
-    <div class="table-wrap"><table id="t-ips"></table></div>
-  </section>
+  <!-- CALLERS -->
+  <div class="view" id="v-callers">
+    <section>
+      <div class="seg-row" id="lists"></div>
+      <h2><span id="list-title"></span> <span class="count" id="list-count"></span></h2>
+      <div class="filters">
+        <input type="search" id="list-q" placeholder="Filter…" autocomplete="off" autocapitalize="off">
+        <select id="list-sort" aria-label="Sort by"></select>
+      </div>
+      <div id="list-body"></div>
+    </section>
+  </div>
 
-  <section id="errors">
-    <h2>Errors and refusals, grouped <span class="count" id="errors-count"></span></h2>
-    <div class="table-wrap"><table id="t-errors"></table></div>
-  </section>
-
-  <section id="breakdown" class="grid2">
-    <div><h2>By pass style (all time)</h2><div class="bars" id="by-style"></div></div>
-    <div><h2>By interface (all time)</h2><div class="bars" id="by-source"></div>
-         <h2 style="margin-top:24px">By action (all time)</h2><div class="bars" id="by-action"></div></div>
-  </section>
-
-  <section id="site">
-    <h2>Website (walletmcppass.com)</h2>
-    <div class="tiles" id="site-tiles"></div>
-    <div class="grid2" style="margin-top:16px">
+  <!-- SITE -->
+  <div class="view" id="v-site">
+    <section>
+      <h2>walletmcppass.com</h2>
+      <div class="tiles" id="site-tiles"></div>
+    </section>
+    <section class="grid2">
       <div><h2>Views per day</h2><div class="bars" id="site-days"></div></div>
-      <div><h2>Clicks (all time)</h2><div class="bars" id="site-clicks"></div></div>
-    </div>
-  </section>
-
-  <section id="limits">
-    <h2>Limits in force</h2>
-    <dl class="kv" id="limits-kv"></dl>
-  </section>
+      <div><h2>Clicks, all time</h2><div class="bars" id="site-clicks"></div></div>
+    </section>
+  </div>
 </main>
-<div id="tip"></div>
-<footer><hr><a href="/">&larr; vps.arshw.com</a></footer>
+<footer><a href="/">&larr; vps.arshw.com</a></footer>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -210,50 +239,39 @@ const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<'
 const n = v => (v ?? 0).toLocaleString('en-US');
 const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '—';
 const ts = s => s ? esc(s.replace('T', ' ').replace('+00:00', '')) : '—';
+const short = s => s ? esc(s.slice(5, 16).replace('T', ' ')) : '—';   // "11-09 20:47"
 const ready = v => v === 1 ? 'yes' : v === 0 ? 'no' : 'unknown';
 const usd = cents => '$' + (cents / 100).toFixed(2);
 const PRICE_CENTS = 1;
+const wide = matchMedia('(min-width:760px)');
 
 const SERIES = [
-  {k: 'free', label: 'Succeeded, free', v: d => d.ok - d.paid},
-  {k: 'paid', label: 'Succeeded, paid', v: d => d.paid},
+  {k: 'free', label: 'Free OK', v: d => d.ok - d.paid},
+  {k: 'paid', label: 'Paid OK', v: d => d.paid},
   {k: 'failed', label: 'Failed', v: d => d.failed},
-  {k: 'limit', label: 'Refused at limit (402)', v: d => d.at_limit},
+  {k: 'limit', label: 'At limit (402)', v: d => d.at_limit},
   {k: 'other', label: 'Refused, other', v: d => d.calls - d.ok - d.failed - d.at_limit},
 ];
 const color = k => `var(--s-${k})`;
 
-// Generic sortable, filterable table. cols: [{k, label, num, fmt(row), cls, sort(row)}]
-const tables = {};
-function table(id, cols, rows, opts = {}) {
-  const t = tables[id] ||= {sort: opts.sort || null, asc: false, filter: ''};
-  t.cols = cols; t.rows = rows;
-  const shown = t.filter ? rows.filter(r => cols.some(c => String(c.sort ? c.sort(r) : r[c.k] ?? '').toLowerCase().includes(t.filter))) : rows.slice();
-  if (t.sort) {
-    const c = cols.find(c => c.k === t.sort);
-    const key = r => c.sort ? c.sort(r) : r[c.k];
-    shown.sort((a, b) => { const x = key(a) ?? '', y = key(b) ?? '';
-      const r = x < y ? -1 : x > y ? 1 : 0; return t.asc ? r : -r; });
-  }
-  $(id).innerHTML = `<thead><tr>${cols.map(c => `<th data-k="${c.k}" class="${c.num ? 'num' : ''} ${t.sort === c.k ? 'sorted' + (t.asc ? ' asc' : '') : ''}">${c.label}</th>`).join('')}</tr></thead>
-    <tbody>${shown.length ? shown.map(r => `<tr>${cols.map(c => `<td class="${c.num ? 'num' : ''} ${c.cls || ''}">${c.fmt ? c.fmt(r) : esc(r[c.k])}</td>`).join('')}</tr>`).join('')
-      : `<tr><td colspan="${cols.length}" class="empty">Nothing here.</td></tr>`}</tbody>`;
-  $(id).querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
-    if (t.sort === th.dataset.k) t.asc = !t.asc; else { t.sort = th.dataset.k; t.asc = false; }
-    table(id, t.cols, t.rows);
-  });
-  return shown.length;
-}
-const counters = {};
-function updateCount(tableId) {
-  const [countId, label] = counters[tableId], t = tables[tableId];
-  const shown = table(tableId, t.cols, t.rows);
-  $(countId).textContent = (t.filter ? `${n(shown)} of ` : '') + `${n(t.rows.length)} ${label}`;
-}
-function filterBox(inputId, tableId) {
-  $(inputId).oninput = e => { tables[tableId].filter = e.target.value.trim().toLowerCase(); updateCount(tableId); };
-}
+let D = null, selDay = null, days = 30, listKind = 'contacts';
 
+// ---------- tabs (old #section links map onto the tab that now holds them) ----------
+const VIEWS = ['overview', 'log', 'callers', 'site'];
+const OLD = {daily: 'overview', breakdown: 'overview', limits: 'overview', payments: 'callers', contacts: 'callers', clients: 'callers', ips: 'callers', errors: 'callers'};
+function route() {
+  let h = location.hash.slice(1) || 'overview';
+  if (OLD[h]) { if (OLD[h] === 'callers') listKind = h; h = OLD[h]; }
+  if (!VIEWS.includes(h)) h = 'overview';
+  VIEWS.forEach(v => $('v-' + v).classList.toggle('on', v === h));
+  document.querySelectorAll('#tabs a').forEach(a => a.classList.toggle('on', a.dataset.v === h));
+  if (h === 'callers' && D) renderList();
+}
+addEventListener('hashchange', () => { route(); scrollTo(0, 0); });
+
+// ---------- shared bits ----------
+const tile = (label, value, sub = '') =>
+  `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
 function bars(id, items) {
   const max = Math.max(1, ...items.map(x => x.c));
   $(id).innerHTML = items.length ? items.map(x => `
@@ -262,126 +280,173 @@ function bars(id, items) {
       <div class="count">${n(x.c)}${x.ok != null ? ` · ${pct(x.ok, x.c)} ok` : ''}</div></div>`).join('')
     : '<div class="empty">No data.</div>';
 }
+const qLink = (v, label = v) => `<a class="q" href="#log" data-q="${esc(v)}">${esc(label)}</a>`;
+const txLink = tx => `<a class="q" href="https://basescan.org/tx/${esc(tx)}" target="_blank" rel="noopener">${esc(tx.slice(0, 12))}…</a>`;
 
-const tile = (label, value, sub = '') =>
-  `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
-
-function chart(days) {
-  const max = Math.max(1, ...days.map(d => d.calls));
-  $('legend').innerHTML = SERIES.map(s => `<span><i style="background:${color(s.k)}"></i>${s.label}</span>`).join('');
-  $('chart').innerHTML = days.map((d, i) => `<div class="col" data-i="${i}">${SERIES.map(s => {
-    const v = s.v(d); return v > 0 ? `<div class="seg" style="height:max(1px, calc(${(v / max * 100).toFixed(2)}% - 2px));background:${color(s.k)}"></div>` : '';
-  }).join('')}</div>`).join('');
-  $('axis-start').textContent = days[0]?.day || ''; $('axis-end').textContent = days.at(-1)?.day || '';
-  const tip = $('tip');
-  $('chart').querySelectorAll('.col').forEach(col => {
-    col.onpointermove = e => {
-      const d = days[col.dataset.i];
-      tip.innerHTML = `<b>${d.day}</b> · ${n(d.calls)} calls · ${n(d.ips)} IPs · ${n(d.emails)} emails<br>` +
-        SERIES.slice().reverse().map(s => `<i style="background:${color(s.k)}"></i>${s.label}: <b>${n(s.v(d))}</b>`).join('<br>');
-      tip.style.display = 'block';
-      tip.style.left = Math.max(8, Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8)) + 'px';
-      tip.style.top = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8) + 'px';
-    };
-    col.onpointerleave = () => tip.style.display = 'none';
-  });
-  table('t-daily', [
-    {k: 'day', label: 'Day', cls: 'mono'}, {k: 'calls', label: 'Calls', num: 1},
-    ...SERIES.map(s => ({k: s.k, label: s.label, num: 1, fmt: r => n(s.v(r)), sort: r => s.v(r)})),
-    {k: 'ips', label: 'IPs', num: 1}, {k: 'emails', label: 'Emails', num: 1},
-  ], days.slice().reverse());
+// Sortable table for wide screens: cols [{k,label,num,fmt,cls}]
+function tableHTML(cols, rows, st) {
+  return `<div class="table-wrap"><table><thead><tr>${cols.map(c =>
+    `<th data-k="${c.k}" class="${c.num ? 'num' : ''} ${st.sort === c.k ? 'sorted' + (st.asc ? ' asc' : '') : ''}">${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${rows.length ? rows.map(r => `<tr>${cols.map(c => `<td class="${c.num ? 'num' : ''} ${c.cls || ''}">${c.fmt ? c.fmt(r) : esc(r[c.k])}</td>`).join('')}</tr>`).join('')
+      : `<tr><td colspan="${cols.length}" class="empty">Nothing here.</td></tr>`}</tbody></table></div>`;
 }
 
-const ipLink = ip => `<a class="ip" href="#log" data-q="${esc(ip)}">${esc(ip)}</a>`;
-const txLink = tx => `<a class="ip" href="https://basescan.org/tx/${esc(tx)}" target="_blank" rel="noopener">${esc(tx.slice(0, 12))}…</a>`;
+// ---------- overview ----------
+function chart(by) {
+  const max = Math.max(1, ...by.map(d => d.calls));
+  $('legend').innerHTML = SERIES.map(s => `<span><i style="background:${color(s.k)}"></i>${s.label}</span>`).join('');
+  $('chart').innerHTML = by.map((d, i) => `<div class="col" data-i="${i}">${SERIES.map(s => {
+    const v = s.v(d); return v > 0 ? `<div class="seg" style="height:max(1px, calc(${(v / max * 100).toFixed(2)}% - 2px));background:${color(s.k)}"></div>` : '';
+  }).join('')}</div>`).join('');
+  $('axis-start').textContent = by[0]?.day || ''; $('axis-end').textContent = by.at(-1)?.day || '';
+  if (selDay == null || !by.some(d => d.day === selDay)) selDay = by.at(-1)?.day;
+  pick(by);
+  const c = $('chart');
+  const at = e => { const r = c.getBoundingClientRect(); return Math.max(0, Math.min(by.length - 1, Math.floor((e.clientX - r.left) / r.width * by.length))); };
+  c.onpointerdown = e => { selDay = by[at(e)].day; pick(by); c._drag = true; };
+  c.onpointermove = e => { if (c._drag || e.pointerType === 'mouse') { selDay = by[at(e)].day; pick(by); } };
+  c.onpointerup = c.onpointercancel = () => c._drag = false;
 
-async function loadOverview() {
-  const d = await (await fetch('api/dashboard?days=' + $('days').value)).json();
-  const a = d.all, t = d.today, w = d.week;
+  const cols = [{k: 'day', label: 'Day', cls: 'mono'}, {k: 'calls', label: 'Calls', num: 1},
+    ...SERIES.map(s => ({k: s.k, label: s.label, num: 1, fmt: r => n(s.v(r))})),
+    {k: 'ips', label: 'IPs', num: 1}, {k: 'emails', label: 'Emails', num: 1}];
+  $('t-daily').innerHTML = `<thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr></thead><tbody>${
+    by.slice().reverse().map(r => `<tr>${cols.map(c => `<td class="${c.num ? 'num' : ''} ${c.cls || ''}">${c.fmt ? c.fmt(r) : esc(r[c.k])}</td>`).join('')}</tr>`).join('')}</tbody>`;
+}
+function pick(by) {
+  const i = by.findIndex(d => d.day === selDay); if (i < 0) return;
+  const d = by[i];
+  $('chart').querySelectorAll('.col').forEach(c => c.classList.toggle('sel', +c.dataset.i === i));
+  $('daycard').innerHTML = `<div class="top"><b>${d.day}</b><span>${n(d.calls)} calls · ${n(d.ips)} IPs · ${n(d.emails)} emails</span></div>
+    <ul>${SERIES.map(s => `<li><span><i style="background:${color(s.k)}"></i>${s.label}</span><b>${n(s.v(d))}</b></li>`).join('')}</ul>`;
+}
+
+function renderOverview() {
+  const d = D, a = d.all, t = d.today, w = d.week;
   $('tiles').innerHTML =
-    tile('Today (UTC)', n(t.calls), `${n(t.ok)} ok · ${n(t.at_limit)} at limit · ${n(t.ips)} IPs`) +
-    tile('Last 7 days', n(w.calls), `${n(w.ok)} ok · ${n(w.ips)} IPs · ${n(w.emails)} emails`) +
-    tile('All time', n(a.calls), `${n(a.ok)} ok (${pct(a.ok, a.calls)}) since ${(a.first_ts || '').slice(0, 10)}`) +
-    tile('Revenue', usd(a.paid * PRICE_CENTS), `${n(a.paid)} paid call${a.paid === 1 ? '' : 's'} · today ${usd(t.paid * PRICE_CENTS)}`) +
-    tile('Refused at free limit', n(a.at_limit), `today ${n(t.at_limit)}`) +
-    tile('Failed builds', n(a.failed), `${pct(a.failed, a.calls)} of calls · ${n(a.caller_info)} missing email/x402`) +
-    tile('Callers', n(a.ips) + ' IPs', `${n(a.emails)} emails · ${n(d.clients.length)} clients`) +
-    tile('Updatable passes', n(d.updatable_passes.live), `${n(d.registrations.devices)} device registrations`);
-
-  $('daily-range').textContent = `last ${d.days} days, UTC`;
+    tile('Today', n(t.ok) + ' ok', `${n(t.calls)} calls · ${n(t.at_limit)} at limit`) +
+    tile('7 days', n(w.ok) + ' ok', `${n(w.calls)} calls · ${n(w.emails)} emails`) +
+    tile('Revenue', usd(a.paid * PRICE_CENTS), `${n(a.paid)} paid · today ${usd(t.paid * PRICE_CENTS)}`) +
+    tile('At free limit', n(a.at_limit), `today ${n(t.at_limit)}`);
+  $('tiles2').innerHTML =
+    tile('All time', n(a.ok) + ' ok', `${n(a.calls)} calls since ${(a.first_ts || '').slice(0, 10)}`) +
+    tile('Failed', n(a.failed), `${pct(a.failed, a.calls)} · ${n(a.caller_info)} no email/x402`) +
+    tile('Callers', n(a.emails), `emails · ${n(a.ips)} IPs · ${n(d.clients.length)} clients`) +
+    tile('Updatable', n(d.updatable_passes.live), `live · ${n(d.registrations.devices)} devices`);
   chart(d.by_day);
-
-  table('t-payments', [
-    {k: 'id', label: '#', num: 1}, {k: 'ts', label: 'Time (UTC)', cls: 'mono', fmt: r => ts(r.ts)},
-    {k: 'amount', label: 'Amount', fmt: () => usd(PRICE_CENTS)}, {k: 'contact_email', label: 'Email', cls: 'mono'},
-    {k: 'client', label: 'Client'}, {k: 'action', label: 'Action'}, {k: 'style', label: 'Style'},
-    {k: 'organization_name', label: 'Org'}, {k: 'ip', label: 'IP', cls: 'mono', fmt: r => ipLink(r.ip)},
-    {k: 'payment_tx', label: 'Tx', cls: 'mono', fmt: r => txLink(r.payment_tx)},
-  ], d.payments);
-  $('pay-count').textContent = `${n(d.payments.length)} · ${usd(d.payments.length * PRICE_CENTS)} total`;
-
-  const exempt = new Set(d.limits.exempt.filter(e => !e.includes('ended')).map(e => e.split(' ')[0]));
-  table('t-contacts', [
-    {k: 'email', label: 'Email', cls: 'mono', fmt: r => `${ipLink(r.email)}${exempt.has(r.email) ? ' <span class="lim">exempt</span>' : ''}`},
-    {k: 'x402_ready', label: 'x402 ready', fmt: r => ready(r.x402_ready)},
-    {k: 'calls', label: 'Calls', num: 1}, {k: 'ok', label: 'OK', num: 1},
-    {k: 'paid', label: 'Paid', num: 1, fmt: r => r.paid ? `<span class="paid">${r.paid}</span>` : '0'},
-    {k: 'at_limit', label: 'At limit', num: 1}, {k: 'ips', label: 'IPs', num: 1},
-    {k: 'first_ts', label: 'First seen', cls: 'mono', fmt: r => ts(r.first_ts)},
-    {k: 'last_ts', label: 'Last seen', cls: 'mono', fmt: r => ts(r.last_ts)},
-  ], d.contacts, {sort: 'last_ts'});
-  counters['t-contacts'] = ['contacts-count', 'emails']; updateCount('t-contacts');
-
-  table('t-clients', [
-    {k: 'k', label: 'Client', cls: 'mono', fmt: r => r.k === 'unknown' ? 'unknown' : ipLink(r.k)},
-    {k: 'c', label: 'Calls', num: 1}, {k: 'ok', label: 'OK', num: 1, fmt: r => `${n(r.ok)} (${pct(r.ok, r.c)})`},
-    {k: 'paid', label: 'Paid', num: 1}, {k: 'ips', label: 'IPs', num: 1},
-    {k: 'last_ts', label: 'Last seen', cls: 'mono', fmt: r => ts(r.last_ts)},
-  ], d.clients, {sort: 'c'});
-  counters['t-clients'] = ['clients-count', 'clients']; updateCount('t-clients');
-
-  table('t-ips', [
-    {k: 'k', label: 'IP', cls: 'mono', fmt: r => ipLink(r.k)}, {k: 'c', label: 'Calls', num: 1},
-    {k: 'ok', label: 'OK', num: 1}, {k: 'paid', label: 'Paid', num: 1}, {k: 'at_limit', label: 'At limit', num: 1},
-    {k: 'emails', label: 'Emails', num: 1}, {k: 'last_ts', label: 'Last seen', cls: 'mono', fmt: r => ts(r.last_ts)},
-  ], d.ips, {sort: 'c'});
-  counters['t-ips'] = ['ips-count', `IPs${d.ips.length >= 500 ? ' (busiest 500; search the log for the rest)' : ''}`]; updateCount('t-ips');
-
-  table('t-errors', [
-    {k: 'k', label: 'Error (first 90 chars)', cls: 'wrap', fmt: r => `<a class="ip" href="#log" data-q="${esc(r.k.slice(0, 40))}">${esc(r.k)}</a>`},
-    {k: 'c', label: 'Count', num: 1}, {k: 'last_ts', label: 'Last', cls: 'mono', fmt: r => ts(r.last_ts)},
-  ], d.errors, {sort: 'c'});
-  $('errors-count').textContent = `${n(d.errors.length)} kinds`;
-
   bars('by-style', d.by_style); bars('by-source', d.by_source); bars('by-action', d.by_action);
-
-  const site = d.site;
-  if (!site) {
-    $('site-tiles').innerHTML = '<div class="empty">Website stats unavailable.</div>';
-  } else {
-    const today = site.days.at(-1) || {views: 0, people: 0};
-    $('site-tiles').innerHTML =
-      tile('Today', n(today.views), `${n(today.people)} people`) +
-      tile('Last 7 days', n(site.week_views), `${n(site.week_people)} people`) +
-      tile('All time', n(site.total_views), `${n(site.total_people)} people`) +
-      tile('Wallet setup link clicks', n(site.setup_clicks), `${n(site.setup_people)} people, all time`);
-    bars('site-days', site.days.slice().reverse().map(x => ({k: x.day, c: x.views})));
-    bars('site-clicks', (site.clicks_all || site.clicks).map(x => ({k: x.event.replace(/_/g, ' '), c: x.c})));
-  }
-
   const L = d.limits;
   $('limits-kv').innerHTML = `
-    <dt>Free per IP per day</dt><dd>${L.free_per_ip}</dd>
-    <dt>Exempt callers, free per IP per day</dt><dd>${L.exempt_per_ip}</dd>
-    <dt>Exempt list (data/free_exempt.txt)</dt><dd class="mono">${L.exempt.map(esc).join(', ') || 'none'}</dd>
+    <dt>Free per caller per day</dt><dd>${L.free_per_ip}</dd>
+    <dt>Exempt callers, free per day</dt><dd>${L.exempt_per_ip}</dd>
+    <dt>Exempt list</dt><dd class="mono">${L.exempt.map(esc).join(', ') || 'none'}</dd>
     <dt>Shared free pool per day</dt><dd>${n(L.global_free)}</dd>
     <dt>Failed calls per caller per day</dt><dd>${L.fail_per_caller}</dd>
     <dt>Paid cap per IP / total per day</dt><dd>${n(L.paid_per_ip)} / ${n(L.paid_global)}</dd>`;
-  $('refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
+
+  const site = d.site;
+  if (!site) { $('site-tiles').innerHTML = '<div class="empty">Website stats unavailable.</div>'; }
+  else {
+    const today = site.days.at(-1) || {views: 0, people: 0};
+    $('site-tiles').innerHTML =
+      tile('Today', n(today.views), `${n(today.people)} people`) +
+      tile('7 days', n(site.week_views), `${n(site.week_people)} people`) +
+      tile('All time', n(site.total_views), `${n(site.total_people)} people`) +
+      tile('Wallet setup clicks', n(site.setup_clicks), `${n(site.setup_people)} people`);
+    bars('site-days', site.days.slice().reverse().map(x => ({k: x.day.slice(5), c: x.views})));
+    bars('site-clicks', (site.clicks_all || site.clicks).map(x => ({k: x.event.replace(/_/g, ' '), c: x.c})));
+  }
 }
 
-// ---- request log: server-side filtering and paging over the whole table ----
-const STATUSES = [['', 'All'], ['ok', 'Succeeded'], ['paid', 'Paid'], ['failed', 'Failed'], ['limit', 'Refused at limit'], ['refused', 'All refusals'], ['caller_info', 'Missing email/x402']];
+async function loadOverview() {
+  D = await (await fetch('api/dashboard?days=' + days)).json();
+  renderOverview();
+  if ($('v-callers').classList.contains('on')) renderList();
+  $('refresh').textContent = 'updated ' + new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+$('range').onclick = e => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  days = +b.dataset.d;
+  $('range').querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === b));
+  loadOverview();
+};
+
+// ---------- callers: contacts / clients / IPs / errors / payments ----------
+const listState = {};
+const exemptSet = () => new Set(D.limits.exempt.filter(e => !e.includes('ended')).map(e => e.split(' ')[0]));
+const exemptTag = e => exemptSet().has(e) ? ' <span class="lim">exempt</span>' : '';
+const LISTS = {
+  contacts: {label: 'Contacts', unit: 'emails', rows: d => d.contacts, sort: 'last_ts',
+    cols: [
+      {k: 'email', label: 'Email', cls: 'mono', fmt: r => qLink(r.email) + exemptTag(r.email)},
+      {k: 'x402_ready', label: 'x402 ready', fmt: r => ready(r.x402_ready)},
+      {k: 'calls', label: 'Calls', num: 1}, {k: 'ok', label: 'OK', num: 1},
+      {k: 'paid', label: 'Paid', num: 1, fmt: r => r.paid ? `<span class="paid">${r.paid}</span>` : '0'},
+      {k: 'at_limit', label: 'At limit', num: 1}, {k: 'ips', label: 'IPs', num: 1},
+      {k: 'first_ts', label: 'First seen', cls: 'mono', fmt: r => ts(r.first_ts)},
+      {k: 'last_ts', label: 'Last seen', cls: 'mono', fmt: r => ts(r.last_ts)}],
+    card: r => ({t: qLink(r.email) + exemptTag(r.email), r: `${n(r.ok)} ok`,
+      m: `${r.paid ? `<span class="paid">${r.paid} paid</span> · ` : ''}${n(r.at_limit)} at limit · x402 ${ready(r.x402_ready)} · ${short(r.last_ts)}`})},
+  clients: {label: 'Clients', unit: 'clients', rows: d => d.clients, sort: 'c',
+    cols: [
+      {k: 'k', label: 'Client', cls: 'mono', fmt: r => r.k === 'unknown' ? 'unknown' : qLink(r.k)},
+      {k: 'c', label: 'Calls', num: 1}, {k: 'ok', label: 'OK', num: 1, fmt: r => `${n(r.ok)} (${pct(r.ok, r.c)})`},
+      {k: 'paid', label: 'Paid', num: 1}, {k: 'ips', label: 'IPs', num: 1},
+      {k: 'last_ts', label: 'Last seen', cls: 'mono', fmt: r => ts(r.last_ts)}],
+    card: r => ({t: r.k === 'unknown' ? 'unknown' : qLink(r.k), r: `${n(r.c)} calls`,
+      m: `${pct(r.ok, r.c)} ok · ${n(r.ips)} IPs${r.paid ? ` · <span class="paid">${r.paid} paid</span>` : ''} · ${short(r.last_ts)}`})},
+  ips: {label: 'IPs', unit: 'IPs', rows: d => d.ips, sort: 'c',
+    cols: [
+      {k: 'k', label: 'IP', cls: 'mono', fmt: r => qLink(r.k)}, {k: 'c', label: 'Calls', num: 1},
+      {k: 'ok', label: 'OK', num: 1}, {k: 'paid', label: 'Paid', num: 1}, {k: 'at_limit', label: 'At limit', num: 1},
+      {k: 'emails', label: 'Emails', num: 1}, {k: 'last_ts', label: 'Last seen', cls: 'mono', fmt: r => ts(r.last_ts)}],
+    card: r => ({t: `<span class="mono">${qLink(r.k)}</span>`, r: `${n(r.c)} calls`,
+      m: `${n(r.ok)} ok · ${n(r.at_limit)} at limit · ${n(r.emails)} emails · ${short(r.last_ts)}`})},
+  errors: {label: 'Errors', unit: 'kinds', rows: d => d.errors, sort: 'c',
+    cols: [
+      {k: 'k', label: 'Error (first 90 chars)', cls: 'wrap', fmt: r => qLink(r.k.slice(0, 40), r.k)},
+      {k: 'c', label: 'Count', num: 1}, {k: 'last_ts', label: 'Last', cls: 'mono', fmt: r => ts(r.last_ts)}],
+    card: r => ({t: `${n(r.c)} times`, r: `last ${short(r.last_ts)}`, x: qLink(r.k.slice(0, 40), r.k)})},
+  payments: {label: 'Payments', unit: 'payments', rows: d => d.payments, sort: 'id',
+    cols: [
+      {k: 'id', label: '#', num: 1}, {k: 'ts', label: 'Time (UTC)', cls: 'mono', fmt: r => ts(r.ts)},
+      {k: 'contact_email', label: 'Email', cls: 'mono'}, {k: 'client', label: 'Client'}, {k: 'action', label: 'Action'},
+      {k: 'style', label: 'Style'}, {k: 'organization_name', label: 'Org'},
+      {k: 'ip', label: 'IP', cls: 'mono', fmt: r => qLink(r.ip)}, {k: 'payment_tx', label: 'Tx', cls: 'mono', fmt: r => txLink(r.payment_tx)}],
+    card: r => ({t: esc(r.contact_email || r.ip), r: `<span class="paid">${usd(PRICE_CENTS)}</span>`,
+      m: `${short(r.ts)} · ${esc(r.action)} ${esc(r.style)} · ${txLink(r.payment_tx)}`})},
+};
+$('lists').innerHTML = Object.entries(LISTS).map(([k, L]) => `<button class="chip" data-l="${k}">${L.label}</button>`).join('');
+$('lists').onclick = e => { const b = e.target.closest('.chip'); if (!b) return; listKind = b.dataset.l; $('list-q').value = ''; renderList(); };
+$('list-q').oninput = () => renderList();
+$('list-sort').onchange = e => { const st = listState[listKind], [k, dir] = e.target.value.split(':'); st.sort = k; st.asc = dir === 'asc'; renderList(); };
+$('list-body').onclick = e => {
+  const th = e.target.closest('th[data-k]'); if (!th) return;
+  const st = listState[listKind];
+  if (st.sort === th.dataset.k) st.asc = !st.asc; else { st.sort = th.dataset.k; st.asc = false; }
+  renderList();
+};
+
+function renderList() {
+  const L = LISTS[listKind], st = listState[listKind] ||= {sort: L.sort, asc: false};
+  $('lists').querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.l === listKind));
+  const all = L.rows(D), f = $('list-q').value.trim().toLowerCase();
+  const rows = f ? all.filter(r => L.cols.some(c => String(r[c.k] ?? '').toLowerCase().includes(f))) : all.slice();
+  rows.sort((a, b) => { const x = a[st.sort] ?? '', y = b[st.sort] ?? ''; const o = x < y ? -1 : x > y ? 1 : 0; return st.asc ? o : -o; });
+  $('list-title').textContent = L.label;
+  $('list-count').textContent = (f ? `${n(rows.length)} of ` : '') + `${n(all.length)} ${L.unit}` +
+    (listKind === 'payments' ? ` · ${usd(all.length * PRICE_CENTS)}` : '') + (listKind === 'ips' && all.length >= 500 ? ' (busiest 500)' : '');
+  $('list-sort').innerHTML = L.cols.flatMap(c => [false, true].map(asc =>
+    `<option value="${c.k}:${asc ? 'asc' : 'desc'}" ${st.sort === c.k && st.asc === asc ? 'selected' : ''}>Sort: ${c.label.replace(/ \(.*/, '')} ${asc ? '↑' : '↓'}</option>`)).join('');
+  if (wide.matches) { $('list-body').innerHTML = tableHTML(L.cols, rows, st); return; }
+  const shown = rows.slice(0, 300);
+  $('list-body').innerHTML = `<div class="cards">${shown.length ? shown.map(r => { const c = L.card(r);
+    return `<div class="card"><div class="l1"><span class="t">${c.t}</span><span class="r">${c.r}</span></div>${c.m ? `<div class="l2">${c.m}</div>` : ''}${c.x ? `<div class="l3">${c.x}</div>` : ''}</div>`; }).join('')
+    : '<div class="empty">Nothing here.</div>'}</div>` + (rows.length > shown.length ? '<div class="hint">Showing the first 300. Filter to narrow it down.</div>' : '');
+}
+
+// ---------- request log: server-side filtering and paging over the whole table ----------
+const STATUSES = [['', 'All'], ['ok', 'Succeeded'], ['paid', 'Paid'], ['failed', 'Failed'], ['limit', 'At limit'], ['refused', 'All refusals'], ['caller_info', 'No email/x402']];
 let logStatus = '', logRows = [], logMatching = 0, logSeq = 0;
 $('status-chips').innerHTML = STATUSES.map(([k, l]) => `<button class="chip${k === '' ? ' on' : ''}" data-s="${k}">${l}</button>`).join('');
 $('status-chips').onclick = e => {
@@ -396,30 +461,45 @@ function logParams() {
   for (const id of ['q', 'source', 'action']) if ($(id).value.trim()) p.set(id, $(id).value.trim());
   return p;
 }
-function resultCell(r) {
-  if (r.payment_tx) return '<span class="paid">paid</span>';
-  if (r.success) return '<span class="ok">ok</span>';
+function result(r) {
+  if (r.payment_tx) return '<span class="badge paid">paid</span>';
+  if (r.success) return '<span class="badge ok">ok</span>';
   const e = r.error || '';
-  if (r.refused) return e.startsWith('rate limit') || e.startsWith('service is at') ? '<span class="lim">402 limit</span>' : '<span class="fail">refused</span>';
-  return '<span class="fail">failed</span>';
+  if (r.refused) return e.startsWith('rate limit') || e.startsWith('service is at') ? '<span class="badge lim">402</span>' : '<span class="badge fail">refused</span>';
+  return '<span class="badge fail">failed</span>';
 }
+const LOG_COLS = [
+  ['#', r => r.id, 'num'], ['Time (UTC)', r => ts(r.ts), 'mono'], ['Result', result], ['Via', r => esc(r.source)], ['Action', r => esc(r.action)],
+  ['Style', r => esc(r.style)], ['Org', r => esc(r.organization_name)], ['Email', r => r.contact_email ? qLink(r.contact_email) : '—', 'mono'],
+  ['x402 ready', r => r.contact_email ? ready(r.x402_ready) : '—'], ['Client', r => (esc(r.client) || '—') + (r.x402 ? ' <span class="paid">x402</span>' : ''), 'mono'],
+  ['IP', r => qLink(r.ip), 'mono'], ['ms', r => r.duration_ms ?? '', 'num'], ['Serial', r => esc(r.serial_number) || '—', 'mono'],
+  ['Payment tx', r => r.payment_tx ? txLink(r.payment_tx) : '—', 'mono'], ['Error', r => esc(r.error), 'err'],
+];
 function renderLog() {
-  $('log-rows').innerHTML = logRows.length ? logRows.map(r => `<tr>
-    <td class="num">${r.id}</td><td class="mono">${ts(r.ts)}</td><td>${resultCell(r)}</td>
-    <td>${esc(r.source)}</td><td>${esc(r.action)}</td><td>${esc(r.style)}</td><td>${esc(r.organization_name)}</td>
-    <td class="mono">${r.contact_email ? ipLink(r.contact_email) : '—'}</td><td>${r.contact_email ? ready(r.x402_ready) : '—'}</td>
-    <td class="mono">${esc(r.client) || '—'}${r.x402 ? ' <span class="paid">x402</span>' : ''}</td>
-    <td class="mono">${ipLink(r.ip)}</td><td class="num">${r.duration_ms ?? ''}</td>
-    <td class="mono">${esc(r.serial_number) || '—'}</td>
-    <td class="mono">${r.payment_tx ? txLink(r.payment_tx) : '—'}</td>
-    <td class="err" title="${esc(r.error)}">${esc(r.error)}</td></tr>`).join('')
-    : '<tr><td colspan="15" class="empty">No matching requests.</td></tr>';
+  if (wide.matches) {
+    $('log-list').innerHTML = `<div class="table-wrap"><table><thead><tr>${LOG_COLS.map(([l, , c]) => `<th class="${c === 'num' ? 'num' : ''}">${l}</th>`).join('')}</tr></thead><tbody>${
+      logRows.length ? logRows.map(r => `<tr>${LOG_COLS.map(([, f, c]) => `<td class="${c || ''}"${c === 'err' ? ` title="${esc(r.error)}"` : ''}>${f(r)}</td>`).join('')}</tr>`).join('')
+      : `<tr><td colspan="${LOG_COLS.length}" class="empty">No matching requests.</td></tr>`}</tbody></table></div>`;
+  } else {
+    $('log-list').innerHTML = `<div class="cards">${logRows.length ? logRows.map(r => `
+      <div class="card tap">
+        <div class="l1">${result(r)}<span class="t">${esc(r.organization_name) || '—'}</span><span class="r mono">${short(r.ts)}</span></div>
+        <div class="l2">${esc(r.contact_email || r.ip)} · ${esc(r.style || '—')} · ${esc(r.source)}${r.action === 'update' ? ' update' : ''}</div>
+        ${r.error ? `<div class="l3">${esc(r.error)}</div>` : ''}
+        <dl>${LOG_COLS.filter(([l]) => l !== 'Error' && l !== 'Result').map(([l, f]) => `<dt>${l}</dt><dd>${f(r)}</dd>`).join('')}</dl>
+      </div>`).join('') : '<div class="empty">No matching requests.</div>'}</div>`;
+  }
   $('log-count').textContent = `${n(logMatching)} matching`;
-  $('log-shown').textContent = `showing ${n(logRows.length)} of ${n(logMatching)}`;
+  $('log-shown').textContent = `showing ${n(logRows.length)}`;
   $('more').style.display = $('all').style.display = logRows.length < logMatching ? '' : 'none';
   $('csv').href = 'api/requests.csv?' + logParams();
 }
-async function loadLog(append = false, limit = 200) {
+$('log-list').onclick = e => {
+  if (e.target.closest('a')) return;
+  const c = e.target.closest('.card.tap'); if (c) c.classList.toggle('open');
+};
+const PAGE = () => wide.matches ? 200 : 50;
+async function loadLog(append = false, limit = PAGE()) {
   const seq = append ? logSeq : ++logSeq;
   const p = logParams(); p.set('limit', limit);
   if (append && logRows.length) p.set('before_id', logRows.at(-1).id);
@@ -428,26 +508,24 @@ async function loadLog(append = false, limit = 200) {
   logRows = append ? logRows.concat(d.rows) : d.rows; logMatching = d.matching;
   renderLog();
 }
-$('more').onclick = () => loadLog(true, 200);
+$('more').onclick = () => loadLog(true, PAGE());
 $('all').onclick = async () => { while (logRows.length < logMatching) { const before = logRows.length; await loadLog(true, 1000); if (logRows.length === before) break; } };
 let qTimer; $('q').oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(() => loadLog(), 250); };
 $('source').onchange = $('action').onchange = () => loadLog();
-// Click an IP, email, client or error anywhere: search the log for it.
+// Tap an IP, email, client or error anywhere: search the log for it.
 document.addEventListener('click', e => {
   const a = e.target.closest('a[data-q]'); if (!a) return;
-  e.preventDefault(); $('q').value = a.dataset.q; loadLog(); $('log').scrollIntoView({behavior: 'smooth'});
+  e.preventDefault(); $('q').value = a.dataset.q; loadLog();
+  if (location.hash !== '#log') location.hash = 'log';
 });
+wide.onchange = () => { renderLog(); if (D) renderList(); };
 
-filterBox('contacts-q', 't-contacts');
-filterBox('clients-q', 't-clients');
-filterBox('ips-q', 't-ips');
-$('days').onchange = loadOverview;
-
+route();
 loadOverview(); loadLog();
-// Refresh every 30 s; the log only refreshes while it's on its first, unsearched page.
+// Refresh every 30 s; the log only refreshes on its first, unsearched page with nothing expanded.
 setInterval(() => {
   loadOverview();
-  if (logRows.length <= 200 && !$('q').value) loadLog();
+  if (logRows.length <= PAGE() && !$('q').value && !document.querySelector('.card.open')) loadLog();
 }, 30000);
 </script>
 </body>
