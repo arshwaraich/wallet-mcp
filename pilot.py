@@ -400,6 +400,8 @@ def main(argv=None) -> None:
     P.init()
     if args.cmd == "new":
         design = json.loads(Path(args.design).read_text())
+        if isinstance(design.get("design"), dict):  # also accept the {design, sample} files of tools/shot.js and samples/
+            design = design["design"]
         r = P.create(args.org, args.event, args.contact, args.event_end, design, args.max, args.keep_colors)
         print(f"id:            {r['id']}\nkey:           {r['key']}\norganizer URL: {r['organizer_url']}\n"
               f"sample link:   {r['sample_url']}")
