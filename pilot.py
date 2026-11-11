@@ -372,6 +372,10 @@ def _new_id() -> str:
 # ---------- CLI ----------
 
 def _cli_setup():
+    # Passes bake in webServiceURL from this, so a CLI run without the service's value makes sample
+    # passes that can never receive updates (it happened once: they pointed at the old vps.arshw.com host).
+    if "WALLET_MCP_PUBLIC_URL" not in os.environ:
+        sys.exit("set WALLET_MCP_PUBLIC_URL to the service's value (production: https://walletmcppass.com)")
     import server  # noqa: F401 -- importing it configures this module (server.py calls pilot.configure)
     import pilot as P  # the module server configured (this file may be running as __main__)
     return P
