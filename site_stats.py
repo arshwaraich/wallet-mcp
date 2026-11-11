@@ -1,6 +1,7 @@
 """Views and clicks for the walletmcppass.com landing page, read from that site's own sqlite db
 (~/projects/walletmcppass-landing/data/walletmcppass.db, mounted read-only into this unit), for the
 tailnet dashboard. Returns None if the db can't be read, so the pass stats still load."""
+import datetime
 import logging
 import re
 import os
@@ -39,12 +40,16 @@ def _count_clicks(rows) -> list[dict]:
     return sorted(({"event": e, "c": c} for e, c in counts.items()), key=lambda x: -x["c"])
 
 
-def stats(days: int = 14) -> dict | None:
+def stats(days: int = 14, tz_min: int = 0) -> dict | None:
+    """Days are the browser's local days (tz_min minutes east of UTC)."""
+    off = datetime.timedelta(minutes=tz_min)
+    local_now = datetime.datetime.now(datetime.timezone.utc) + off
+    since = (local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+             - datetime.timedelta(days=days - 1) - off).strftime("%Y-%m-%dT%H:%M:%S")
     try:
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2)
         try:
-            rows = con.execute("SELECT ts, event, ip, ua FROM events WHERE ts >= date('now', ?)",
-                               (f"-{days - 1} day",)).fetchall()
+            rows = con.execute("SELECT ts, event, ip, ua FROM events WHERE ts >= ?", (since,)).fetchall()
             total = con.execute("SELECT ip, ua FROM events WHERE event = 'pageview'").fetchall()
             all_clicks = con.execute("SELECT event, ip, ua FROM events WHERE event != 'pageview'").fetchall()
             setup_all = con.execute("SELECT count(*), count(DISTINCT ip) FROM events WHERE event = ?",
@@ -60,7 +65,8 @@ def stats(days: int = 14) -> dict | None:
         if not _human(ip, ua):
             continue
         if event == "pageview":
-            day = by_day.setdefault(ts[:10], {"views": 0, "ips": set()})
+            local = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")) + off
+            day = by_day.setdefault(local.strftime("%Y-%m-%d"), {"views": 0, "ips": set()})
             day["views"] += 1
             day["ips"].add(ip)
         elif _real_event(event):
