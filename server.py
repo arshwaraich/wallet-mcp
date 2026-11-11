@@ -16,9 +16,11 @@ limit; past it, a caller can pay per call with x402 (payments.py) instead of
 being refused, without any change to the tool interface.
 """
 import base64
+import csv
 import datetime
 import hashlib
 import inspect
+import io
 import json
 import logging
 import os
@@ -41,11 +43,13 @@ from starlette.responses import FileResponse, JSONResponse, Response
 import anyio
 
 import apns
+import csv_clean
 import db
 import image_fetch
 import image_gen
 import pass_builder
 import payments
+import pilot
 import site_stats
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -72,6 +76,7 @@ MAX_UPDATABLE_HOURS = 30 * 24  # updatable passes are stored for 1 hour by defau
 DEFAULT_ICON_COLOR = "#c98500"  # site accent color
 
 db.init()
+pilot.init()
 
 server = MCPServer(
     "wallet-mcp",
@@ -115,6 +120,7 @@ def _sweep_downloads() -> None:
             purged = db.purge_expired_passes()
             if purged:
                 logger.info("deleted %d updatable pass(es) whose update window ended", purged)
+            pilot.purge_orphans()
         except Exception:
             logger.error("purging expired passes failed: %s", traceback.format_exc())
         now = time.time()
@@ -1190,6 +1196,265 @@ async def download(request: Request) -> Response:
         media_type="application/vnd.apple.pkpass",
         filename="pass.pkpass",
     )
+
+
+# --- Organizer pilots (pilot.py): REST API behind a secret "<id>.<token>" key; attendee pass links ---
+
+PILOT_BODY_LIMIT = 3 * 1024 * 1024
+PILOT_CSV_LIMIT = 2 * 1024 * 1024
+CLEAN_LIMITER = anyio.CapacityLimiter(2)  # a clean may wait on a model call for up to a minute
+_pilot_locks: dict = {}
+
+
+def _pilot_error(message: str, status: int = 400) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status)
+
+
+def _pilot_lock(pilot_id: str):
+    return _pilot_locks.setdefault(pilot_id, anyio.Lock())
+
+
+async def _pilot_body(request: Request):
+    """(body dict, None) or (None, error response)."""
+    raw = await request.body()
+    if len(raw) > PILOT_BODY_LIMIT:
+        return None, _pilot_error("request body too large", 413)
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, _pilot_error("request body must be a JSON object")
+    if not isinstance(body, dict):
+        return None, _pilot_error("request body must be a JSON object")
+    return body, None
+
+
+def _pilot_for(request: Request, key):
+    """(pilot, None) or (None, error response). Wrong key and unknown id look the same."""
+    p = pilot.authenticate(request.path_params["id"], key)
+    if p is None:
+        return None, _pilot_error("invalid pilot key", 403)
+    return pilot.with_design(p), None
+
+
+def _pilot_disk_ok() -> bool:
+    return shutil.disk_usage(DOWNLOAD_DIR).free >= MIN_FREE_DISK_BYTES
+
+
+def _pilot_preview_path(pilot_id: str) -> Path:
+    return pilot.PREVIEW_DIR / f"{pilot_id}.png"
+
+
+@server.custom_route("/api/pilot/{id}", methods=["GET"])
+async def api_pilot_get(request: Request) -> Response:
+    p, err = _pilot_for(request, request.query_params.get("key"))
+    if err:
+        return err
+    return JSONResponse({
+        "id": p["id"], "org": p["org"], "event_name": p["event_name"], "event_end": p["event_end"],
+        "design": p["design_obj"], "sample_url": pilot.sample_link(p),
+        "preview_png_url": f"{PUBLIC_BASE_URL}/api/pilot/{p['id']}/preview.png"
+        if _pilot_preview_path(p["id"]).exists() else None,
+        "issued": pilot.issued_count(p["id"]), "max_passes": p["max_passes"], "contact_email": p["contact_email"],
+    })
+
+
+@server.custom_route("/api/pilot/{id}/preview.png", methods=["GET"])
+async def api_pilot_preview(request: Request) -> Response:
+    pilot_id = request.path_params["id"]
+    path = _pilot_preview_path(pilot_id)
+    if not pilot.ID_RE.match(pilot_id) or not path.is_file():
+        return _pilot_error("no preview", 404)
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
+
+
+@server.custom_route("/api/pilot/{id}/clean", methods=["POST"])
+async def api_pilot_clean(request: Request) -> Response:
+    body, err = await _pilot_body(request)
+    if err:
+        return err
+    p, err = _pilot_for(request, body.get("key"))
+    if err:
+        return err
+    text = body.get("csv")
+    if not isinstance(text, str) or not text.strip():
+        return _pilot_error("csv must be the file's text")
+    if len(text.encode()) > PILOT_CSV_LIMIT:
+        return _pilot_error("csv is larger than 2 MB", 413)
+    result = await anyio.to_thread.run_sync(lambda: csv_clean.clean(text, salt=p["id"]), limiter=CLEAN_LIMITER)
+    return JSONResponse(result)
+
+
+def _pilot_rows(raw):
+    """(rows, None) or (None, message): validated {name, email, ticket, type} rows, repeats of a ticket dropped
+    after the first (they get the same link)."""
+    if not isinstance(raw, list) or not raw:
+        return None, "rows must be a non-empty list"
+    if len(raw) > pilot.MAX_ROWS_PER_REQUEST:
+        return None, f"at most {pilot.MAX_ROWS_PER_REQUEST} rows per request"
+    rows = []
+    for i, r in enumerate(raw, 1):
+        if not isinstance(r, dict):
+            return None, f"row {i}: must be an object"
+        vals = {k: r.get(k, "") for k in ("name", "email", "ticket", "type")}
+        if any(not isinstance(v, str) for v in vals.values()):
+            return None, f"row {i}: name, email, ticket and type must be strings"
+        vals = {k: v.strip() for k, v in vals.items()}
+        vals["type"] = vals["type"] or csv_clean.DEFAULT_TYPE
+        if not vals["name"] or len(vals["name"]) > 120:
+            return None, f"row {i}: name is required (max 120 characters)"
+        if not vals["ticket"] or len(vals["ticket"]) > 64:
+            return None, f"row {i}: ticket is required (max 64 characters)"
+        if len(vals["type"]) > 100:
+            return None, f"row {i}: type is too long"
+        if vals["email"] and not csv_clean.EMAIL_RE.match(vals["email"]):
+            return None, f"row {i}: invalid email"
+        rows.append(vals)
+    return rows, None
+
+
+@server.custom_route("/api/pilot/{id}/issue", methods=["POST"])
+async def api_pilot_issue(request: Request) -> Response:
+    body, err = await _pilot_body(request)
+    if err:
+        return err
+    p, err = _pilot_for(request, body.get("key"))
+    if err:
+        return err
+    rows, message = _pilot_rows(body.get("rows"))
+    if message:
+        return _pilot_error(message)
+    if pilot.expires_epoch(p) <= time.time():
+        return _pilot_error("this event has ended; no more passes can be issued")
+    if not _pilot_disk_ok():
+        return _pilot_error("the service is temporarily out of capacity, try again later", 503)
+    ip = _client_ip(request)
+    unique: dict = {}
+    for row in rows:
+        unique.setdefault(row["ticket"], row)
+    async with _pilot_lock(p["id"]):
+        live = pilot.live_tickets(p["id"])
+        fresh = [t for t in unique if t not in live]
+        total = pilot.issued_count(p["id"])
+        if total + len(fresh) > p["max_passes"]:
+            return _pilot_error(f"this pilot is limited to {p['max_passes']} passes; {total} are issued and this "
+                                f"request would add {len(fresh)} more")
+        results: dict = {}
+
+        async def work(ticket, row):
+            try:
+                results[ticket] = await anyio.to_thread.run_sync(
+                    lambda: pilot.issue_one(p, row, ip), limiter=BUILD_LIMITER)
+            except Exception as e:
+                if not isinstance(e, pass_builder.PassBuildError):
+                    logger.error("pilot issue failed: %s", traceback.format_exc())
+                results[ticket] = e
+
+        async with anyio.create_task_group() as tg:
+            for ticket, row in unique.items():
+                tg.start_soon(work, ticket, row)
+        for ticket, r in results.items():
+            if isinstance(r, Exception):
+                who = unique[ticket]["name"]
+                msg = str(r) if isinstance(r, pass_builder.PassBuildError) else "internal error building the pass"
+                return _pilot_error(f"could not build the pass for {who} ({ticket}): {msg}",
+                                    400 if isinstance(r, pass_builder.PassBuildError) else 500)
+        passes, seen = [], set()
+        for row in rows:
+            r = results[row["ticket"]]
+            first = row["ticket"] not in seen
+            seen.add(row["ticket"])
+            passes.append({**row, "link": r["link"], "new": r["new"] and first})
+        created = sum(1 for x in passes if x["new"])
+        return JSONResponse({"passes": passes, "created": created, "reused": len(passes) - created,
+                             "issued_total": pilot.issued_count(p["id"])})
+
+
+def _csv_cell(value: str) -> str:
+    """Neutralise spreadsheet formulas in organizer-opened exports."""
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+
+@server.custom_route("/api/pilot/{id}/links.csv", methods=["GET"])
+async def api_pilot_links(request: Request) -> Response:
+    p, err = _pilot_for(request, request.query_params.get("key"))
+    if err:
+        return err
+    out = io.StringIO()
+    w = csv.writer(out, lineterminator="\r\n")
+    w.writerow(["name", "email", "ticket", "type", "link"])
+    for r in pilot.issued_rows(p["id"]):
+        w.writerow([_csv_cell(r["name"]), _csv_cell(r["email"]), r["ticket"], _csv_cell(r["type"]),
+                    pilot.pass_link(r["serial"], r["auth_token"])])
+    return Response(out.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{p["id"]}-links.csv"',
+                             "Cache-Control": "no-store"})
+
+
+@server.custom_route("/api/pilot/{id}/update", methods=["POST"])
+async def api_pilot_update(request: Request) -> Response:
+    body, err = await _pilot_body(request)
+    if err:
+        return err
+    p, err = _pilot_for(request, body.get("key"))
+    if err:
+        return err
+    try:
+        changes = pilot.validate_changes(body.get("changes"))
+    except ValueError as e:
+        return _pilot_error(str(e))
+    if not _pilot_disk_ok():
+        return _pilot_error("the service is temporarily out of capacity, try again later", 503)
+    ip = _client_ip(request)
+    async with _pilot_lock(p["id"]):
+        merged = pilot.merge_changes(p["design_obj"], changes)
+        try:  # prove the new design builds before touching any stored pass
+            await anyio.to_thread.run_sync(
+                lambda: _build_pkpass(pilot.fill(merged, pilot.SAMPLE_ROW), str(uuid.uuid4()), None),
+                limiter=BUILD_LIMITER)
+        except pass_builder.PassBuildError as e:
+            return _pilot_error(f"that change would not build: {e}")
+        pilot.save_design(p["id"], merged)
+        p["design_obj"] = merged
+        targets = [{**r, "serial": r["serial"]} for r in pilot.issued_rows(p["id"])]
+        if p["sample_serial"]:
+            targets.append({**pilot.SAMPLE_ROW, "serial": p["sample_serial"]})
+        done, failed = [], 0
+
+        async def work(row):
+            nonlocal failed
+            try:
+                if await anyio.to_thread.run_sync(lambda: pilot.rebuild_one(p, row, ip), limiter=BUILD_LIMITER):
+                    done.append(row["serial"])
+            except Exception:
+                failed += 1
+                logger.error("pilot update rebuild failed: %s", traceback.format_exc())
+
+        async with anyio.create_task_group() as tg:
+            for row in targets:
+                tg.start_soon(work, row)
+        tokens = await anyio.to_thread.run_sync(pilot.all_push_tokens, done)
+        notified, dead = await anyio.to_thread.run_sync(apns.push, tokens)
+        pilot.drop_dead_tokens(dead)
+    attendees = len(done) - (1 if p["sample_serial"] in done else 0)
+    result = {"updated": attendees, "notified_devices": notified}
+    if failed:
+        result["failed"] = failed
+    return JSONResponse(result)
+
+
+@server.custom_route("/pass/{serial}/{auth_token}", methods=["GET"])
+async def pilot_pass(request: Request) -> Response:
+    """The permanent attendee link: always the current version of the pass."""
+    row = db.get_pass(request.path_params["serial"])
+    token = request.path_params["auth_token"]
+    if row is None or not secrets.compare_digest(token, row["auth_token"]) or not pilot.is_pilot_serial(row["serial"]):
+        return Response("unknown or expired pass link", status_code=404)
+    return Response(row["pkpass"], media_type="application/vnd.apple.pkpass",
+                    headers={"Last-Modified": formatdate(row["updated"], usegmt=True), "Cache-Control": "no-cache",
+                             "Content-Disposition": 'inline; filename="pass.pkpass"'})
+
+
+pilot.configure(_build_pkpass, _resolve_image_urls, PUBLIC_BASE_URL)
 
 
 if __name__ == "__main__":
