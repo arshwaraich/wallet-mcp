@@ -1,0 +1,5 @@
+#,First name,Last name,Email,Ticket name,Payment ID,Start Date (UTC),Submit Date (UTC),Network ID
+a1,Alex,Rivera,alex@corp.io,Standard,pay_1,2026-10-01,2026-10-01,n1
+a2,Priya,Nair,priya@corp.io,Standard,pay_2,2026-10-01,2026-10-01,n2
+a3,,,ghost@corp.io,Standard,pay_3,2026-10-01,2026-10-01,n3
+a4,Sam,Okoye,sam@corp.io,Patron,pay_4,2026-10-01,2026-10-01,n4
