@@ -1,0 +1,5 @@
+Order #,Order Date,First Name,Last Name,Email,Quantity,Ticket Type,Attendee #,Barcode #
+1001,2026-10-01,Alex,Rivera,alex@corp.io,1,Early Bird,5001,98765001
+1002,2026-10-02,Priya,Nair,priya@corp.io,2,General,5002,98765002
+1002,2026-10-02,Dev,Nair,priya@corp.io,2,General,5003,98765003
+1003,2026-10-03,Sam,Okoye,sam@corp.io,1,General,5002,98765004
