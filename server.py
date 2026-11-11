@@ -950,8 +950,9 @@ async def api_stats(request: Request) -> Response:
 @server.custom_route("/api/dashboard", methods=["GET"])
 async def api_dashboard(request: Request) -> Response:
     days = min(max(int(request.query_params.get("days") or 30), 1), 366)
-    return JSONResponse({**await anyio.to_thread.run_sync(db.dashboard_stats, days),
-                         "site": await anyio.to_thread.run_sync(site_stats.stats, days)})
+    tz_min = min(max(int(request.query_params.get("tz") or 0), -840), 840)  # browser's minutes east of UTC
+    return JSONResponse({**await anyio.to_thread.run_sync(db.dashboard_stats, days, tz_min),
+                         "site": await anyio.to_thread.run_sync(site_stats.stats, days, tz_min)})
 
 
 def _log_filters(request: Request) -> dict:

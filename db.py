@@ -500,10 +500,19 @@ def request_log(*, before_id: int | None = None, limit: int = 100, status=None, 
     return {"matching": matching, "rows": rows}
 
 
-def dashboard_stats(days: int = 30) -> dict:
-    today = _today_start()
-    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days - 1)).strftime(
-        "%Y-%m-%dT00:00:00")
+def _local_day_start_utc(tz_min: int, days_back: int = 0) -> str:
+    """UTC timestamp of local midnight days_back days ago, local = UTC + tz_min minutes (the browser's zone)."""
+    off = datetime.timedelta(minutes=tz_min)
+    local = datetime.datetime.now(datetime.timezone.utc) + off
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0) - datetime.timedelta(days=days_back)
+    return (start - off).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def dashboard_stats(days: int = 30, tz_min: int = 0) -> dict:
+    """Day buckets and the today/week tiles follow the browser's zone (tz_min minutes east of UTC)."""
+    today = _local_day_start_utc(tz_min)
+    since = _local_day_start_utc(tz_min, days - 1)
+    local_day = f"substr(datetime(ts, '{int(tz_min):+d} minutes'), 1, 10)"
     lim = LOG_STATUS["limit"]
     ci = LOG_STATUS["caller_info"]
     counts = f"""COUNT(*) calls, SUM(success) ok, SUM(payment_tx IS NOT NULL) paid,
@@ -519,9 +528,8 @@ def dashboard_stats(days: int = 30) -> dict:
         out = {
             "all": one(f"SELECT {counts}, MIN(ts) first_ts FROM requests"),
             "today": one(f"SELECT {counts} FROM requests WHERE ts >= ?", today),
-            "week": one(f"SELECT {counts} FROM requests WHERE ts >= ?", (
-                datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=6)).strftime("%Y-%m-%dT00:00:00")),
-            "by_day": many(f"SELECT substr(ts, 1, 10) day, {counts} FROM requests WHERE ts >= ? "
+            "week": one(f"SELECT {counts} FROM requests WHERE ts >= ?", _local_day_start_utc(tz_min, 6)),
+            "by_day": many(f"SELECT {local_day} day, {counts} FROM requests WHERE ts >= ? "
                            "GROUP BY day ORDER BY day", since),
             "by_style": many("SELECT COALESCE(style, '?') k, COUNT(*) c, SUM(success) ok FROM requests "
                              "GROUP BY k ORDER BY c DESC"),

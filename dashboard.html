@@ -157,7 +157,7 @@ footer a{color:var(--link); text-decoration:none}
     <section><div class="tiles" id="tiles"></div></section>
 
     <section>
-      <h2>Requests per day <span class="count">UTC</span></h2>
+      <h2>Requests per day <span class="count" id="tzlabel">local time</span></h2>
       <div class="seg-row" id="range">
         <button class="chip" data-d="7">7 days</button><button class="chip on" data-d="30">30 days</button>
         <button class="chip" data-d="90">90 days</button><button class="chip" data-d="366">1 year</button>
@@ -238,11 +238,20 @@ const $ = id => document.getElementById(id);
 const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const n = v => (v ?? 0).toLocaleString('en-US');
 const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '—';
-const ts = s => s ? esc(s.replace('T', ' ').replace('+00:00', '')) : '—';
-const short = s => s ? esc(s.slice(5, 16).replace('T', ' ')) : '—';   // "11-09 20:47"
+// Server timestamps are UTC; show them in the browser's own zone.
+const TZ_MIN = -new Date().getTimezoneOffset();
+const TZ_NAME = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+const pad = v => String(v).padStart(2, '0');
+const local = s => {
+  const d = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(s) ? s : s + 'Z');
+  return isNaN(d) ? s : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+const ts = s => s ? esc(local(s)) : '—';
+const short = s => s ? esc(local(s).slice(5, 16)) : '—';   // "11-09 20:47"
 const ready = v => v === 1 ? 'yes' : v === 0 ? 'no' : 'unknown';
 const usd = cents => '$' + (cents / 100).toFixed(2);
 const PRICE_CENTS = 1;
+document.addEventListener('DOMContentLoaded', () => { const l = $('tzlabel'); if (l) l.textContent = TZ_NAME; });
 const wide = matchMedia('(min-width:760px)');
 
 const SERIES = [
@@ -329,7 +338,7 @@ function renderOverview() {
     tile('Revenue', usd(a.paid * PRICE_CENTS), `${n(a.paid)} paid · today ${usd(t.paid * PRICE_CENTS)}`) +
     tile('At free limit', n(a.at_limit), `today ${n(t.at_limit)}`);
   $('tiles2').innerHTML =
-    tile('All time', n(a.ok) + ' ok', `${n(a.calls)} calls since ${(a.first_ts || '').slice(0, 10)}`) +
+    tile('All time', n(a.ok) + ' ok', `${n(a.calls)} calls since ${a.first_ts ? local(a.first_ts).slice(0, 10) : ''}`) +
     tile('Failed', n(a.failed), `${pct(a.failed, a.calls)} · ${n(a.caller_info)} no email/x402`) +
     tile('Callers', n(a.emails), `emails · ${n(a.ips)} IPs · ${n(d.clients.length)} clients`) +
     tile('Updatable', n(d.updatable_passes.live), `live · ${n(d.registrations.devices)} devices`);
@@ -359,7 +368,7 @@ function renderOverview() {
 }
 
 async function loadOverview() {
-  D = await (await fetch('api/dashboard?days=' + days)).json();
+  D = await (await fetch('api/dashboard?days=' + days + '&tz=' + TZ_MIN)).json();
   renderOverview();
   if ($('v-callers').classList.contains('on')) renderList();
   $('refresh').textContent = 'updated ' + new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
@@ -409,7 +418,7 @@ const LISTS = {
     card: r => ({t: `${n(r.c)} times`, r: `last ${short(r.last_ts)}`, x: qLink(r.k.slice(0, 40), r.k)})},
   payments: {label: 'Payments', unit: 'payments', rows: d => d.payments, sort: 'id',
     cols: [
-      {k: 'id', label: '#', num: 1}, {k: 'ts', label: 'Time (UTC)', cls: 'mono', fmt: r => ts(r.ts)},
+      {k: 'id', label: '#', num: 1}, {k: 'ts', label: 'Time', cls: 'mono', fmt: r => ts(r.ts)},
       {k: 'contact_email', label: 'Email', cls: 'mono'}, {k: 'client', label: 'Client'}, {k: 'action', label: 'Action'},
       {k: 'style', label: 'Style'}, {k: 'organization_name', label: 'Org'},
       {k: 'ip', label: 'IP', cls: 'mono', fmt: r => qLink(r.ip)}, {k: 'payment_tx', label: 'Tx', cls: 'mono', fmt: r => txLink(r.payment_tx)}],
@@ -469,7 +478,7 @@ function result(r) {
   return '<span class="badge fail">failed</span>';
 }
 const LOG_COLS = [
-  ['#', r => r.id, 'num'], ['Time (UTC)', r => ts(r.ts), 'mono'], ['Result', result], ['Via', r => esc(r.source)], ['Action', r => esc(r.action)],
+  ['#', r => r.id, 'num'], ['Time', r => ts(r.ts), 'mono'], ['Result', result], ['Via', r => esc(r.source)], ['Action', r => esc(r.action)],
   ['Style', r => esc(r.style)], ['Org', r => esc(r.organization_name)], ['Email', r => r.contact_email ? qLink(r.contact_email) : '—', 'mono'],
   ['x402 ready', r => r.contact_email ? ready(r.x402_ready) : '—'], ['Client', r => (esc(r.client) || '—') + (r.x402 ? ' <span class="paid">x402</span>' : ''), 'mono'],
   ['IP', r => qLink(r.ip), 'mono'], ['ms', r => r.duration_ms ?? '', 'num'], ['Serial', r => esc(r.serial_number) || '—', 'mono'],
