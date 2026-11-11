@@ -173,15 +173,16 @@ CALLER_INFO_ERROR = "contact_email or x402_ready missing or invalid"
 
 
 def _caller_count(conn, today: str, ip: str, contact_email: str | None, condition: str) -> int:
-    """Today's rows matching condition for this caller: max of by IP and by email (email only on shared egress)."""
+    """Today's rows matching condition for this caller: max of by IP and by email (email only on shared egress).
+    Organizer-pilot rows (source 'pilot') never count: pilots have their own cap (pilot.py)."""
     email = contact_email.strip().lower() if contact_email else None
     used = 0
     if not is_shared_egress(ip):
-        (used,) = conn.execute(f"SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND {condition}",
+        (used,) = conn.execute(f"SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND source != 'pilot' AND {condition}",
                                (today, ip)).fetchone()
     if email:
         (by_email,) = conn.execute(
-            f"SELECT COUNT(*) FROM requests WHERE ts >= ? AND LOWER(contact_email) = ? AND {condition}",
+            f"SELECT COUNT(*) FROM requests WHERE ts >= ? AND LOWER(contact_email) = ? AND source != 'pilot' AND {condition}",
             (today, email)).fetchone()
         used = max(used, by_email)
     return used
@@ -206,7 +207,8 @@ def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = 
         (global_count,) = conn.execute(
             # Calls paid with x402 don't use up the free daily budget, and neither do refusals, so a
             # caller retrying past its own limit can't run the shared pool dry for everyone else.
-            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NULL AND refused = 0", (today,)
+            "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NULL AND refused = 0 AND source != 'pilot'",
+            (today,)
         ).fetchone()
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
@@ -227,7 +229,7 @@ def public_stats() -> dict:
             f"""SELECT COUNT(*) total,
                       SUM(ts >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-7 days')) week,
                       MAX(ts) last
-               FROM requests WHERE success = 1 AND action = 'create'
+               FROM requests WHERE success = 1 AND action = 'create' AND source != 'pilot'
                  AND ip NOT IN ({','.join('?' * len(OWN_IPS))})""", OWN_IPS).fetchone()
     return {"passes": row["total"] or 0, "passes_7d": row["week"] or 0, "last_pass": row["last"]}
 
@@ -471,7 +473,7 @@ def _log_where(status: str | None, source: str | None, action: str | None, q: st
     where, args = [], []
     if status in LOG_STATUS:
         where.append(LOG_STATUS[status])
-    if source in ("mcp", "api"):
+    if source in ("mcp", "api", "pilot"):
         where.append("source = ?"), args.append(source)
     if action in ("create", "update"):
         where.append("action = ?"), args.append(action)
