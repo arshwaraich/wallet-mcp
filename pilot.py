@@ -14,7 +14,6 @@ The free /api/pilot/{id}/issue and /update routes refuse batches.
 """
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import re
@@ -26,6 +25,7 @@ from pathlib import Path
 
 import db
 import palette
+import pkpass
 
 ID_RE = re.compile(r"^[a-z0-9]{8}$")
 KEY_RE = re.compile(r"^([a-z0-9]{8})\.([A-Za-z0-9_-]{16,100})$")
@@ -39,16 +39,7 @@ UPDATE_KEYS = ("header_fields", "primary_fields", "secondary_fields", "auxiliary
 FIELD_LISTS = ("header_fields", "primary_fields", "secondary_fields", "auxiliary_fields", "back_fields")
 PREVIEW_DIR = Path(os.environ.get("WALLET_MCP_PREVIEWS", Path(__file__).parent / "data" / "previews"))
 
-# Set by server.py (which owns pass building) so this module never imports it at import time.
-_build = None      # (params, serial, auth_token) -> pkpass bytes
-_resolve = None    # params -> params with image URLs fetched to base64
-PUBLIC_URL = "https://walletmcppass.com"
 ORGANIZER_URL = os.environ.get("WALLET_MCP_ORGANIZER_URL", "https://walletmcppass.com")
-
-
-def configure(build, resolve, public_url: str) -> None:
-    global _build, _resolve, PUBLIC_URL
-    _build, _resolve, PUBLIC_URL = build, resolve, public_url
 
 
 def init() -> None:
@@ -66,10 +57,6 @@ def init() -> None:
             conn.execute("ALTER TABLE pilots ADD COLUMN kind TEXT NOT NULL DEFAULT 'pilot'")
 
 
-def sha(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
 # ---------- keys ----------
 
 def get(pilot_id: str) -> dict | None:
@@ -84,8 +71,8 @@ def authenticate(pilot_id: str, key) -> dict | None:
     """The pilot if key is "<id>.<token>" for this id; same answer (None) for unknown id and wrong key."""
     m = KEY_RE.match(key) if isinstance(key, str) else None
     pilot = get(pilot_id)
-    stored = pilot["key_hash"] if pilot else sha("x")  # compare anyway so timing doesn't tell the two apart
-    ok = secrets.compare_digest(stored, sha(m.group(2) if m else ""))
+    stored = pilot["key_hash"] if pilot else db.hash_token("x")  # compare anyway so timing doesn't tell the two apart
+    ok = secrets.compare_digest(stored, db.hash_token(m.group(2) if m else ""))
     return pilot if (ok and pilot and m and m.group(1) == pilot_id) else None
 
 
@@ -130,23 +117,26 @@ def expires_epoch(pilot: dict) -> int:
     return pilot["event_end_epoch"] + GRACE_SECONDS
 
 
-def _iso(epoch: int) -> str:
-    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(timespec="seconds")
-
-
 def pass_link(serial: str, auth_token: str) -> str:
-    return f"{PUBLIC_URL}/pass/{serial}/{auth_token}"
+    return f"{pkpass.PUBLIC_BASE_URL}/pass/{serial}/{auth_token}"
 
 
 # ---------- storing passes ----------
 
+def stored_params(pilot: dict, row: dict) -> str:
+    """What a pilot/batch pass keeps in passes.params: its pilot and attendee row, not the filled design
+    (which repeats the design's base64 images in every pass). Nothing reads it back: these passes are
+    rebuilt from the pilot's design, and their edit_hash is of a token nobody holds, so update_wallet_pass
+    can't reach them. (Rows stored before this change hold the filled design; that's fine too.)"""
+    return json.dumps({"pilot": pilot["id"], "row": {k: row.get(k, "") for k in ("name", "email", "ticket", "type")}})
+
+
 def _store(pilot: dict, row: dict) -> tuple[str, str]:
     """Build + store one attendee pass (not yet recorded in pilot_passes). Returns (serial, auth_token)."""
     serial, auth = str(uuid.uuid4()), secrets.token_urlsafe(24)
-    params = fill(pilot["design_obj"], row)
-    pkpass = _build(params, serial, auth)
-    db.store_pass(serial, auth, sha(secrets.token_urlsafe(24)), json.dumps(params), pkpass, int(time.time()),
-                  expires_epoch(pilot))
+    data = pkpass.build(fill(pilot["design_obj"], row), serial, auth)
+    db.store_pass(serial, auth, db.hash_token(secrets.token_urlsafe(24)), stored_params(pilot, row), data,
+                  int(time.time()), expires_epoch(pilot))
     return serial, auth
 
 
@@ -225,11 +215,6 @@ def delete(pilot_id: str) -> None:
 def issued_count(pilot_id: str) -> int:
     with db._lock, db._conn() as conn:
         return conn.execute("SELECT COUNT(*) FROM pilot_passes WHERE pilot_id = ?", (pilot_id,)).fetchone()[0]
-
-
-def issued_tickets(pilot_id: str) -> set:
-    with db._lock, db._conn() as conn:
-        return {r[0] for r in conn.execute("SELECT ticket FROM pilot_passes WHERE pilot_id = ?", (pilot_id,))}
 
 
 def live_tickets(pilot_id: str) -> set:
@@ -342,12 +327,11 @@ def rebuild_one(pilot: dict, row: dict, ip: str, logged: bool = True, stage: str
     if stored is None:
         return False
     try:
-        params = fill(pilot["design_obj"], row)
-        pkpass = _build(params, row["serial"], stored["auth_token"])
+        data = pkpass.build(fill(pilot["design_obj"], row), row["serial"], stored["auth_token"])
         if stage:
-            db.stage_pass(stage, row["serial"], json.dumps(params), pkpass)
+            db.stage_pass(stage, row["serial"], stored_params(pilot, row), data)
         else:
-            db.replace_pass(row["serial"], json.dumps(params), pkpass, max(int(time.time()), stored["updated"] + 1))
+            db.replace_pass(row["serial"], stored_params(pilot, row), data, max(int(time.time()), stored["updated"] + 1))
     except Exception as e:
         if logged:
             log(pilot, ip, success=False, error=str(e)[:300], started=started, serial=row["serial"], action="update")
@@ -379,24 +363,24 @@ def create(org: str, event: str, contact: str, event_end: str, design: dict, max
     end = parse_end(event_end)
     if end.timestamp() + GRACE_SECONDS <= time.time():
         raise ValueError("event end is in the past")
-    design = normalize_design(_resolve(design), org, event)
+    design = normalize_design(pkpass.resolve_image_urls(design), org, event)
     if not keep_colors:
         design = repair_design_colors(design)
     if kind == "batch":
         design = ensure_field_keys(design)
     pilot_id = next(i for i in (_new_id() for _ in range(50)) if get(i) is None)
     token = secrets.token_urlsafe(24)
-    pilot = {"id": pilot_id, "key_hash": sha(token), "org": org, "event_name": event,
+    pilot = {"id": pilot_id, "key_hash": db.hash_token(token), "org": org, "event_name": event,
              "event_end": end.isoformat(timespec="seconds"), "event_end_epoch": int(end.timestamp()),
              "contact_email": contact, "design": json.dumps(design), "max_passes": max_passes,
              "sample_serial": None, "created": db._now(), "kind": kind}
     pilot = with_design(pilot)
     serial, auth = str(uuid.uuid4()), secrets.token_urlsafe(24)
-    params = fill(design, sample_row or SAMPLE_ROW)  # a batch checks with a real row: barcodes may need digits
-    pkpass = _build(params, serial, auth)  # raises before anything is stored if the design is invalid
+    row = sample_row or SAMPLE_ROW  # a batch checks with a real row: barcodes may need digits
+    data = pkpass.build(fill(design, row), serial, auth)  # raises before anything is stored if the design is invalid
     if kind != "batch":
-        db.store_pass(serial, auth, sha(secrets.token_urlsafe(24)), json.dumps(params), pkpass, int(time.time()),
-                      expires_epoch(pilot))
+        db.store_pass(serial, auth, db.hash_token(secrets.token_urlsafe(24)), stored_params(pilot, row), data,
+                      int(time.time()), expires_epoch(pilot))
         pilot["sample_serial"] = serial
     cols = ("id", "key_hash", "org", "event_name", "event_end", "event_end_epoch", "contact_email", "design",
             "max_passes", "sample_serial", "created", "kind")
@@ -414,16 +398,6 @@ def _new_id() -> str:
 
 
 # ---------- CLI ----------
-
-def _cli_setup():
-    # Passes bake in webServiceURL from this, so a CLI run without the service's value makes sample
-    # passes that can never receive updates (it happened once: they pointed at the old vps.arshw.com host).
-    if "WALLET_MCP_PUBLIC_URL" not in os.environ:
-        sys.exit("set WALLET_MCP_PUBLIC_URL to the service's value (production: https://walletmcppass.com)")
-    import server  # noqa: F401 -- importing it configures this module (server.py calls pilot.configure)
-    import pilot as P  # the module server configured (this file may be running as __main__)
-    return P
-
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="pilot.py", description=__doc__.split("\n\n")[0])
@@ -443,15 +417,18 @@ def main(argv=None) -> None:
     p.add_argument("id")
     p.add_argument("out")
     args = ap.parse_args(argv)
-    P = _cli_setup()
+    # Passes bake in webServiceURL from this (pkpass.PUBLIC_BASE_URL), so a CLI run without the service's value
+    # makes sample passes that can never receive updates (it happened once: they pointed at the old vps.arshw.com host).
+    if "WALLET_MCP_PUBLIC_URL" not in os.environ:
+        sys.exit("set WALLET_MCP_PUBLIC_URL to the service's value (production: https://walletmcppass.com)")
     db.init()
-    P.init()
+    init()
     if args.cmd == "new":
         design = json.loads(Path(args.design).read_text())
         if isinstance(design.get("design"), dict):  # also accept the {design, sample} files of tools/shot.js and samples/
             design = design["design"]
         try:
-            r = P.create(args.org, args.event, args.contact, args.event_end, design, args.max, args.keep_colors)
+            r = create(args.org, args.event, args.contact, args.event_end, design, args.max, args.keep_colors)
         except ValueError as e:
             raise SystemExit(str(e))
         print(f"id:            {r['id']}\nkey:           {r['key']}\norganizer URL: {r['organizer_url']}\n"
@@ -465,17 +442,17 @@ def main(argv=None) -> None:
             rows = conn.execute("SELECT * FROM pilots ORDER BY created").fetchall()
         for r in rows:
             print(f"{r['id']}  [{r['kind']}] {r['org']} / {r['event_name']}  ends {r['event_end']}  "
-                  f"{P.issued_count(r['id'])}/{r['max_passes']} issued  {r['contact_email']}")
+                  f"{issued_count(r['id'])}/{r['max_passes']} issued  {r['contact_email']}")
         return
-    pilot = P.get(args.id)
+    pilot = get(args.id)
     if not pilot:
         raise SystemExit(f"no pilot {args.id}")
-    pilot = P.with_design(pilot)
+    pilot = with_design(pilot)
     if args.cmd == "show":
         d = {k: v for k, v in pilot["design_obj"].items() if not k.endswith("_png_b64")}
         print(json.dumps({**{k: pilot[k] for k in ("id", "org", "event_name", "event_end", "contact_email",
                                                    "max_passes", "created")},
-                          "issued": P.issued_count(args.id), "sample_url": P.sample_link(pilot),
+                          "issued": issued_count(args.id), "sample_url": sample_link(pilot),
                           "images": [k for k in pilot["design_obj"] if k.endswith("_png_b64")], "design": d},
                          indent=2))
         print("(the key is stored hashed; it was printed once by `new`)", file=sys.stderr)

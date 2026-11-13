@@ -2,6 +2,7 @@
 
 MCP and REST API calls share one log, so the limits cover both combined."""
 import datetime
+import hashlib
 import ipaddress
 import os
 import sqlite3
@@ -300,6 +301,15 @@ MAX_DEVICES_PER_PASS = 100
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def iso(epoch: int) -> str:
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def hash_token(token: str) -> str:
+    """How secret tokens are stored (pass edit tokens, pilot and batch keys)."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def pass_exists(serial: str) -> bool:
