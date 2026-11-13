@@ -1,0 +1,2908 @@
+{
+  "instructions": "Creates signed Apple Wallet (.pkpass) passes -- boarding passes, event tickets, coupons, store cards and generic passes -- and returns an https download link valid for 1 hour. No account or API key, but every call must send the user's contact_email and x402_ready. Pricing: a call is one create or one update. The first 10 successful calls each day per caller (IP address or contact_email) are free (while a shared pool of 500 free calls a day lasts); every call after them is paid. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC. Each paid call costs $0.01 in USDC on Base, paid with x402 (the refusal carries the payment requirements; retry the same call with the signed payment in the x402_payment argument, or in _meta[\"x402/payment\"]). A payment is settled only after the pass is built, so a failed build is never charged. Setup guide: https://walletmcppass.com/#wallet-setup. Without x402, wait for the reset. For many passes from one design (event tickets for a guest list), use create_wallet_pass_batch: permanent per-attendee links, paid from the first pass ($0.01 each, one x402 payment per call). Passes are signed with this service's own certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this service, not by an airline or venue. A pass's barcode only works where the original one did if barcode_message is that original barcode's data.",
+  "rest_request_schemas": {
+    "_BatchDesign": {
+      "additionalProperties": false,
+      "properties": {
+        "artwork_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artwork Png B64"
+        },
+        "auxiliary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auxiliary Fields"
+        },
+        "back_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Back Fields"
+        },
+        "background_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Color"
+        },
+        "background_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Png B64"
+        },
+        "barcode_alt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Alt Text"
+        },
+        "barcode_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": "QR",
+          "title": "Barcode Format"
+        },
+        "barcode_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Message"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "expiration_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expiration Date"
+        },
+        "featured_actions": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Featured Actions"
+        },
+        "footer_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Footer Fields"
+        },
+        "foreground_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Foreground Color"
+        },
+        "generate_logo": {
+          "default": true,
+          "title": "Generate Logo",
+          "type": "boolean"
+        },
+        "header_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Header Fields"
+        },
+        "icon_color": {
+          "default": "#c98500",
+          "title": "Icon Color",
+          "type": "string"
+        },
+        "icon_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Png B64"
+        },
+        "icon_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Text"
+        },
+        "info_links": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Info Links"
+        },
+        "label_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Color"
+        },
+        "locations": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locations"
+        },
+        "logo_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Color"
+        },
+        "logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Png B64"
+        },
+        "logo_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Text"
+        },
+        "max_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Distance"
+        },
+        "organization_name": {
+          "title": "Organization Name",
+          "type": "string"
+        },
+        "poster": {
+          "default": false,
+          "title": "Poster",
+          "type": "boolean"
+        },
+        "primary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Fields"
+        },
+        "primary_logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Logo Png B64"
+        },
+        "relevant_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relevant Date"
+        },
+        "secondary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Fields"
+        },
+        "secondary_logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Logo Png B64"
+        },
+        "semantic_layout": {
+          "default": false,
+          "title": "Semantic Layout",
+          "type": "boolean"
+        },
+        "semantics": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantics"
+        },
+        "strip_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strip Png B64"
+        },
+        "style": {
+          "default": "eventTicket",
+          "title": "Style",
+          "type": "string"
+        },
+        "thumbnail_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thumbnail Png B64"
+        },
+        "transit_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transit Type"
+        },
+        "voided": {
+          "default": false,
+          "title": "Voided",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "organization_name",
+        "description"
+      ],
+      "title": "BatchDesign",
+      "type": "object"
+    },
+    "_PassRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "artwork_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artwork Png B64"
+        },
+        "auxiliary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auxiliary Fields"
+        },
+        "back_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Back Fields"
+        },
+        "background_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Color"
+        },
+        "background_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Png B64"
+        },
+        "barcode_alt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Alt Text"
+        },
+        "barcode_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": "QR",
+          "title": "Barcode Format"
+        },
+        "barcode_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Message"
+        },
+        "contact_email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contact Email"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "expiration_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expiration Date"
+        },
+        "featured_actions": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Featured Actions"
+        },
+        "footer_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Footer Fields"
+        },
+        "foreground_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Foreground Color"
+        },
+        "generate_logo": {
+          "default": true,
+          "title": "Generate Logo",
+          "type": "boolean"
+        },
+        "header_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Header Fields"
+        },
+        "icon_color": {
+          "default": "#c98500",
+          "title": "Icon Color",
+          "type": "string"
+        },
+        "icon_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Png B64"
+        },
+        "icon_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Text"
+        },
+        "info_links": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Info Links"
+        },
+        "label_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Color"
+        },
+        "locations": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locations"
+        },
+        "logo_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Color"
+        },
+        "logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Png B64"
+        },
+        "logo_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Text"
+        },
+        "max_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Distance"
+        },
+        "organization_name": {
+          "title": "Organization Name",
+          "type": "string"
+        },
+        "poster": {
+          "default": false,
+          "title": "Poster",
+          "type": "boolean"
+        },
+        "primary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Fields"
+        },
+        "primary_logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Logo Png B64"
+        },
+        "relevant_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relevant Date"
+        },
+        "secondary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Fields"
+        },
+        "secondary_logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Logo Png B64"
+        },
+        "semantic_layout": {
+          "default": false,
+          "title": "Semantic Layout",
+          "type": "boolean"
+        },
+        "semantics": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantics"
+        },
+        "serial_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Serial Number"
+        },
+        "strip_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strip Png B64"
+        },
+        "style": {
+          "title": "Style",
+          "type": "string"
+        },
+        "thumbnail_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thumbnail Png B64"
+        },
+        "transit_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transit Type"
+        },
+        "updatable": {
+          "default": false,
+          "title": "Updatable",
+          "type": "boolean"
+        },
+        "updatable_hours": {
+          "default": 1,
+          "title": "Updatable Hours",
+          "type": "integer"
+        },
+        "voided": {
+          "default": false,
+          "title": "Voided",
+          "type": "boolean"
+        },
+        "x402_payment": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X402 Payment"
+        },
+        "x402_ready": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "const": "unknown",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X402 Ready"
+        }
+      },
+      "required": [
+        "style",
+        "organization_name",
+        "description"
+      ],
+      "title": "PassRequest",
+      "type": "object"
+    },
+    "_UpdateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "artwork_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artwork Png B64"
+        },
+        "auxiliary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auxiliary Fields"
+        },
+        "back_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Back Fields"
+        },
+        "background_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Color"
+        },
+        "background_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Png B64"
+        },
+        "barcode_alt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Alt Text"
+        },
+        "barcode_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Format"
+        },
+        "barcode_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Barcode Message"
+        },
+        "contact_email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contact Email"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "expiration_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expiration Date"
+        },
+        "featured_actions": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Featured Actions"
+        },
+        "footer_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Footer Fields"
+        },
+        "foreground_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Foreground Color"
+        },
+        "generate_logo": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generate Logo"
+        },
+        "header_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Header Fields"
+        },
+        "icon_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Color"
+        },
+        "icon_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Png B64"
+        },
+        "icon_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon Text"
+        },
+        "info_links": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Info Links"
+        },
+        "label_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Color"
+        },
+        "locations": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locations"
+        },
+        "logo_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Color"
+        },
+        "logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Png B64"
+        },
+        "logo_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logo Text"
+        },
+        "max_distance": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Distance"
+        },
+        "organization_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Organization Name"
+        },
+        "poster": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Poster"
+        },
+        "primary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Fields"
+        },
+        "primary_logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Logo Png B64"
+        },
+        "relevant_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relevant Date"
+        },
+        "secondary_fields": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Fields"
+        },
+        "secondary_logo_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Logo Png B64"
+        },
+        "semantic_layout": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Layout"
+        },
+        "semantics": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantics"
+        },
+        "strip_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strip Png B64"
+        },
+        "style": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Style"
+        },
+        "thumbnail_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thumbnail Png B64"
+        },
+        "transit_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transit Type"
+        },
+        "voided": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voided"
+        },
+        "x402_payment": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X402 Payment"
+        },
+        "x402_ready": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "const": "unknown",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X402 Ready"
+        }
+      },
+      "title": "UpdateRequest",
+      "type": "object"
+    }
+  },
+  "tools": {
+    "create_wallet_pass": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Create Apple Wallet pass"
+      },
+      "description": "Create a signed Apple Wallet pass (.pkpass) and return a link to download it.\n\n    Builds one pass in one of the five Wallet styles -- boardingPass, eventTicket, coupon,\n    storeCard or generic -- from the text fields, colors, barcode and optional PNG images\n    given below, signs it with this service's Apple Pass Type ID certificate, and returns an\n    https download_url valid for 1 hour. Opening the link on an iPhone shows \"Add to\n    Apple Wallet\". Passes install on any iOS version; the iOS 26/27 layouts fall back to the\n    classic style on older iPhones.\n\n    Barcodes: QR, PDF417, Aztec and Code128 on every iOS version; Code39, Codabar, EAN13 and\n    ITF on iOS 27+. The barcode encodes exactly barcode_message. Gate and till scanners read\n    that data, so a copy of an existing boarding pass, ticket or loyalty card only scans if\n    barcode_message is the original barcode's content (airline boarding passes are usually\n    PDF417 or Aztec, holding an IATA BCBP string such as \"M1DOE/JANE ...\"). This tool does not issue\n    tickets, check anyone in, or contact airlines or venues.\n\n    The link must be opened in Safari on the iPhone: Wallet adds a pass from Safari, but not\n    from a .pkpass file handed over by another app. Google Wallet on Android also imports these\n    files. Not supported: NFC passes.\n\n    With updatable=True the pass can be changed later with update_wallet_pass, and copies\n    already in Wallet refresh themselves. Its contents are then stored on this server for\n    updatable_hours (1 hour by default, at most 30 days), then deleted.\n\n    Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus\n    edit_token and updatable_until when updatable=True. With x402_ready=False and 3 or fewer\n    free passes left today, also free_passes_left_today and x402_setup (how to set up x402\n    payments): pass that on to the user.\n\n    Pricing: a call is one create or one update. The first 10 successful calls each day per caller (IP address\n    or contact_email) are free (while a shared pool of 500 free calls a day lasts); failed calls don't\n    count (up to 20 failures a day per caller), and counts reset at 00:00 UTC.\n    Every call after them costs $0.01 in USDC on Base, paid with x402: the refusal carries the\n    payment requirements; have the user's wallet tool sign them and retry the same call with the\n    result as x402_payment. A paid result includes the payment receipt. Payment is settled only\n    after the pass is built, so a failed build is never charged.\n\n    Args:\n        style: one of \"boardingPass\", \"eventTicket\", \"coupon\", \"generic\", \"storeCard\".\n        organization_name: shown as the pass issuer.\n        description: accessibility description (required by Wallet, not usually shown).\n        logo_text: text shown next to the logo image.\n        transit_type: only for style=\"boardingPass\" -- \"Air\", \"Boat\", \"Bus\", \"Generic\", or \"Train\" (default \"Air\").\n        barcode_message: raw text/data encoded into the barcode. Omit for no barcode.\n        barcode_format: a format name or an ordered list of them; each becomes a barcode with the\n            same message, and Wallet shows the first one the device supports. Nothing is added that\n            you don't list. Formats: \"QR\" (default), \"PDF417\", \"Aztec\", \"Code128\" (all iOS versions),\n            and iOS 27+ only: \"Code39\", \"Codabar\", \"EAN13\", \"ITF\" -- older iPhones skip these, so\n            e.g. [\"EAN13\", \"Code128\"] shows EAN13 on iOS 27 and Code128 before it. EAN13 needs\n            12-13 digits, ITF an even number of digits, Code39 uppercase letters/digits.\n        barcode_alt_text: human-readable text shown under the barcode (e.g. the card number).\n        background_color / foreground_color / label_color: hex colors, e.g. \"#1a1a19\".\n        relevant_date / expiration_date: ISO 8601 timestamps.\n        locations: up to 10 places where the pass appears on the lock screen when the iPhone is\n            nearby, each {\"latitude\": float, \"longitude\": float, \"altitude\": optional float,\n            \"relevantText\": optional str shown on the lock screen, e.g. \"Your gym card\"}. Look up\n            the coordinates of the actual branch, not just the brand. For boardingPass and\n            eventTicket the pass is relevant near a location around relevant_date if one is set;\n            the other styles use location alone. Wallet only shows a pass within its own default\n            radius of a location, which is small for store cards and coupons.\n        max_distance: meters; shrinks the default radius around every location (Wallet uses the\n            smaller of the two, so it cannot enlarge it). Requires locations.\n        voided: mark the pass voided/used (shows a \"VOID\" stamp).\n        primary_fields / secondary_fields / auxiliary_fields / header_fields / back_fields:\n            lists of {\"key\": optional str, \"label\": optional str, \"value\": str, \"changeMessage\":\n            optional str} shown on the pass. changeMessage only matters on updatable passes: when\n            an update changes that field's value, the iPhone shows it as a lock-screen notification,\n            with %@ replaced by the new value (e.g. \"You now have %@ points\"); without %@ Wallet\n            shows a generic message. Updates match fields by key, so give fields that will change\n            an explicit key (auto keys are by position).\n        serial_number: unique id for this pass; auto-generated if omitted.\n        icon_color / icon_text: control the auto-generated icon (a colored square with initials)\n            when icon_png_b64 is not supplied.\n        logo_color: color of the auto-generated logo image, a wordmark of logo_text (or\n            organization_name) drawn on a transparent background over background_color. Defaults\n            to icon_color. Wallet also renders logo_text as text beside the logo image, so the\n            generated wordmark repeats it -- set generate_logo=False to show only the text.\n        icon_png_b64 / logo_png_b64: PNG to use instead of auto-generated art.\n        Every *_png_b64 parameter takes either base64 PNG data or an https:// URL of an image\n        (PNG, JPEG, WebP or GIF, up to 5 MB; non-PNG is converted to PNG). The URL is fetched once,\n        when the pass is built.\n        generate_logo: set False to include no auto-generated logo or primary logo at all (both are\n            optional in Wallet; a supplied logo_png_b64/primary_logo_png_b64 is still used).\n        poster: (iOS 27+) render as Apple's new full-bleed \"Poster Generic\" layout -- large background\n            image, header field, up to 4 primary fields, up to 2 footer_fields, and a square QR code.\n            Only for style \"generic\", \"storeCard\" or \"coupon\"; that style is kept as the fallback\n            older iPhones display (secondary/auxiliary fields only show on the fallback). Good for\n            memberships, loyalty cards and gift cards.\n        footer_fields: up to 2 fields along the bottom of a poster pass (requires poster=True).\n        background_png_b64: base64 PNG poster background, ideally 1035x1515 px (345x505pt @3x);\n            a gradient in background_color is generated if omitted. Only used when poster=True.\n        featured_actions: (iOS 27+) up to 2 tappable shortcut cards shown under the pass, each\n            {\"type\": ..., \"url\": \"https://...\"}. type is one of: viewSchedule, watchTrailer,\n            listenToMusic, call (url must be \"tel:+...\"), addToBalance, order, shop,\n            membershipBenefits, bookAppointment, bookCar, bookFlight, bookStay, viewOffersRewards.\n            Works on every style; ignored by older iPhones.\n        semantics: machine-readable tags (Apple's SemanticTags) that Wallet uses for Siri/Maps/\n            Calendar suggestions on every style, and to lay out the semantic designs below. Values\n            are emitted as given; unknown keys and wrong types are rejected. Dates are ISO 8601\n            with an offset. Common shapes: passengerName {\"givenName\", \"familyName\"}; flightNumber\n            is a number (123, not \"AI123\"); seats [{\"seatNumber\", \"seatRow\", \"seatSection\", ...}];\n            venueLocation {\"latitude\", \"longitude\"}; totalPrice {\"amount\": \"12.50\",\n            \"currencyCode\": \"INR\"}; eventType one of generic, livePerformance, movie, sports,\n            conference, convention, workshop, socialGathering.\n        semantic_layout: use Wallet's semantic design, with the classic style kept for older\n            iPhones -- which only show primary/secondary/auxiliary fields, so still fill those.\n            - boardingPass (iOS 26+, airline only, transit_type \"Air\"): live flight status, gate\n              changes, badges. Requires semantics airlineCode, flightNumber, departureAirportCode,\n              departureCityName, destinationAirportCode, destinationCityName, originalBoardingDate,\n              originalDepartureDate, originalArrivalDate, passengerName, plus departure and\n              destination time zones (IANA, e.g. \"Asia/Kolkata\"). Apple's docs call these\n              departureLocationTimeZone/destinationLocationTimeZone but Apple's pass-builder code\n              uses departureAirportTimeZone/destinationAirportTimeZone; either is accepted, and\n              giving both is safest.\n            - eventTicket (iOS 26+ \"poster event ticket\"): requires eventName, venueName,\n              venueRegionName, venueRoom; sports also needs awayTeamAbbreviation and\n              homeTeamAbbreviation, livePerformance needs performerNames. Apple says this design\n              is meant for NFC entry, not barcodes, and NFC passes need an Apple entitlement this\n              server doesn't have -- Wallet may show the classic event ticket instead.\n        info_links: top-level links that fill the event guide (event tickets) or the airline and\n            services page (boarding passes). URL keys (http/https): accessibilityURL, addOnURL,\n            bagPolicyURL, merchandiseURL, orderFoodURL, parkingInformationURL, purchaseParkingURL,\n            sellURL, transferURL, transitInformationURL, contactVenueWebsite,\n            directionsInformationURL, changeSeatURL, entertainmentURL,\n            purchaseAdditionalBaggageURL, purchaseLoungeAccessURL, purchaseWifiURL, upgradeURL,\n            managementURL, registerServiceAnimalURL, reportLostBagURL, requestWheelchairURL,\n            transitProviderWebsiteURL. Text keys: contactVenueEmail, contactVenuePhoneNumber,\n            transitProviderEmail, transitProviderPhoneNumber.\n        Extra images (base64 PNG or https URL). Which image shows where depends on style and iOS version\n        (from Apple's Pass Designer docs); Wallet ignores an image a layout has no slot for:\n            primary_logo_png_b64: max 126x30pt. Boarding pass and coupon on iOS 27+, event ticket\n                on iOS 18+, poster. On those, the plain logo is only shown by older iOS. A wordmark\n                is auto-generated for poster and semantic_layout passes unless generate_logo=False.\n            secondary_logo_png_b64: max 135x12pt. Event tickets, iOS 18+.\n            strip_png_b64: 375x144pt banner behind the primary fields. Coupon, store card and\n                event ticket; not shown on iOS 26+ coupon/store card.\n            thumbnail_png_b64: 90x90pt. Generic and event ticket.\n            artwork_png_b64: 358x448pt poster event ticket artwork (eventTicket with\n                semantic_layout, iOS 27+); if neither this nor background_png_b64 is given, a\n                gradient in background_color is generated, since Wallet needs one of them.\n            background_png_b64 is also used on eventTicket (blurred behind the classic ticket).\n        updatable: keep this pass on the server so update_wallet_pass can change it later. The\n            response then includes an edit_token: the only way to update the pass, and it can't be\n            recovered, so give it to the user. Wallet registers each iPhone that adds the pass, and an\n            update reaches them within seconds. The pass contents are stored (other passes only log\n            the style and organization_name). Use for passes that change: loyalty points, gate or seat\n            changes, memberships that can be cancelled.\n        updatable_hours: how long an updatable pass can be updated, 1 (default) to 720 (30 days),\n            counted from creation; updates don't extend it. Afterwards the stored pass is deleted and\n            can't be changed again, while copies in Wallet stay as they last were. Pick it to cover\n            the pass's useful life, e.g. until a flight lands or an event ends. Only with updatable=True.\n        contact_email: required. The user's address, so the operator of this service can reach them\n            about it, for example if it changes or breaks for them. Ask the user for it; never take it\n            from the pass details or make one up. It isn't added to the pass, and it's kept in the\n            request log.\n        x402_ready: required. True if this client can pay with x402, False if it can't, \"unknown\" if\n            you don't know. It shows the operator how many clients could pay after their free passes.\n            Only logged: it changes neither price nor limits.\n        x402_payment: only after a refusal that asked for payment. The signed x402 payment for the\n            requirements in that refusal (the PaymentPayload JSON object, or its base64), e.g. from\n            a wallet connector's sign/pay tool. Same as sending it in _meta[\"x402/payment\"].\n\n    ",
+      "inputSchema": {
+        "properties": {
+          "artwork_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artwork Png B64"
+          },
+          "auxiliary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Auxiliary Fields"
+          },
+          "back_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Back Fields"
+          },
+          "background_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Background Color"
+          },
+          "background_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Background Png B64"
+          },
+          "barcode_alt_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Barcode Alt Text"
+          },
+          "barcode_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "default": "QR",
+            "title": "Barcode Format"
+          },
+          "barcode_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Barcode Message"
+          },
+          "contact_email": {
+            "title": "Contact Email",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "expiration_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expiration Date"
+          },
+          "featured_actions": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Featured Actions"
+          },
+          "footer_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Footer Fields"
+          },
+          "foreground_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Foreground Color"
+          },
+          "generate_logo": {
+            "default": true,
+            "title": "Generate Logo",
+            "type": "boolean"
+          },
+          "header_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Header Fields"
+          },
+          "icon_color": {
+            "default": "#c98500",
+            "title": "Icon Color",
+            "type": "string"
+          },
+          "icon_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Png B64"
+          },
+          "icon_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Text"
+          },
+          "info_links": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Info Links"
+          },
+          "label_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label Color"
+          },
+          "locations": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Locations"
+          },
+          "logo_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Logo Color"
+          },
+          "logo_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Logo Png B64"
+          },
+          "logo_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Logo Text"
+          },
+          "max_distance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Distance"
+          },
+          "organization_name": {
+            "title": "Organization Name",
+            "type": "string"
+          },
+          "poster": {
+            "default": false,
+            "title": "Poster",
+            "type": "boolean"
+          },
+          "primary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Primary Fields"
+          },
+          "primary_logo_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Primary Logo Png B64"
+          },
+          "relevant_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Relevant Date"
+          },
+          "secondary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Secondary Fields"
+          },
+          "secondary_logo_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Secondary Logo Png B64"
+          },
+          "semantic_layout": {
+            "default": false,
+            "title": "Semantic Layout",
+            "type": "boolean"
+          },
+          "semantics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Semantics"
+          },
+          "serial_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Serial Number"
+          },
+          "strip_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strip Png B64"
+          },
+          "style": {
+            "title": "Style",
+            "type": "string"
+          },
+          "thumbnail_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thumbnail Png B64"
+          },
+          "transit_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Transit Type"
+          },
+          "updatable": {
+            "default": false,
+            "title": "Updatable",
+            "type": "boolean"
+          },
+          "updatable_hours": {
+            "default": 1,
+            "title": "Updatable Hours",
+            "type": "integer"
+          },
+          "voided": {
+            "default": false,
+            "title": "Voided",
+            "type": "boolean"
+          },
+          "x402_payment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "X402 Payment"
+          },
+          "x402_ready": {
+            "enum": [
+              true,
+              false,
+              "unknown"
+            ],
+            "title": "X402 Ready"
+          }
+        },
+        "required": [
+          "style",
+          "organization_name",
+          "description",
+          "contact_email",
+          "x402_ready"
+        ],
+        "title": "create_wallet_passArguments",
+        "type": "object"
+      },
+      "name": "create_wallet_pass",
+      "title": "Create Apple Wallet pass"
+    },
+    "create_wallet_pass_batch": {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Create Apple Wallet passes in bulk"
+      },
+      "description": "Create one Apple Wallet pass per attendee from a single design, e.g. tickets for a guest list.\n\n    Paid, with no free tier: each new pass costs $0.01 in USDC on Base via x402, charged as one\n    payment for the whole call ($0.01 x the number of new passes). The first call is refused with\n    the exact amount; retry it unchanged with the signed payment in x402_payment. Nothing is charged\n    unless every pass builds. A row whose ticket is already in the batch is not charged again and gets\n    the same link.\n\n    Each pass gets a permanent https link (not the 1-hour download link of create_wallet_pass) that\n    always serves the latest version, and stays installable and updatable until event_end + 7 days.\n    Send the links to attendees yourself (email, WhatsApp, a form); this service sends nothing.\n\n    Args:\n        rows: up to 1000 attendees per call (5000 per batch), each {\"name\": str, \"ticket\": str,\n            \"type\": optional str (default \"General admission\"), \"email\": optional str}. ticket is\n            the unique id within the batch (and the default barcode message). Parse a CSV into\n            these rows yourself.\n        design: for a new batch, create_wallet_pass's parameters (style, organization_name,\n            description, colors, fields, images, ...; not serial_number/updatable/contact_email)\n            whose strings may contain {name} {ticket} {type} {email}, filled in per attendee.\n            Defaults: style \"eventTicket\", barcode_message \"{ticket}\". Leave out with batch_key.\n        event_end: for a new batch, when the event ends (ISO 8601, within a year). Leave out with batch_key.\n        batch_key: to add attendees to a batch made earlier, the batch_key it returned.\n        contact_email, x402_ready, x402_payment: as for create_wallet_pass (all calls are paid here).\n\n    Returns {batch_key (new batch only: it can't be recovered, give it to the user), batch_id,\n    passes: [{name, ticket, type, email, link, new}], created, reused, issued_total, charged,\n    links_csv_url (all links as a CSV, also secret), updatable_until, payment}.\n    ",
+      "inputSchema": {
+        "properties": {
+          "batch_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Batch Key"
+          },
+          "contact_email": {
+            "title": "Contact Email",
+            "type": "string"
+          },
+          "design": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Design"
+          },
+          "event_end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event End"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "x402_payment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "X402 Payment"
+          },
+          "x402_ready": {
+            "enum": [
+              true,
+              false,
+              "unknown"
+            ],
+            "title": "X402 Ready"
+          }
+        },
+        "required": [
+          "rows",
+          "contact_email",
+          "x402_ready"
+        ],
+        "title": "create_wallet_pass_batchArguments",
+        "type": "object"
+      },
+      "name": "create_wallet_pass_batch",
+      "title": "Create Apple Wallet passes in bulk"
+    },
+    "update_wallet_pass": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Update Apple Wallet pass"
+      },
+      "description": "Change a pass made with create_wallet_pass(updatable=True); every iPhone that added it refreshes.\n\n    Takes the serial_number and edit_token returned when the pass was created, the required\n    contact_email and x402_ready, plus any of create_wallet_pass's parameters (x402_payment included), with the same meanings. Each parameter given replaces the\n    stored value completely (a fields list replaces the whole list, so resend unchanged fields\n    too); parameters left out keep their current values. Clear a text value with \"\" and a list\n    with []. To cancel a pass, set voided=True: Wallet marks it void on every iPhone.\n\n    Wallet asks the server for the new version as soon as Apple delivers the push, usually within\n    seconds. A field's changeMessage is shown on the lock screen when that field's value changes.\n\n    Only works until the pass's updatable_until time (set by updatable_hours at creation).\n\n    Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier,\n    notified_devices, updatable_until}. notified_devices counts the iPhones the push was sent to, not ones that\n    have already refreshed. The download_url (valid 1 hour) is only needed to add the pass to a\n    new device. With x402_ready=False the result also has x402_setup, as for create_wallet_pass.\n    ",
+      "inputSchema": {
+        "properties": {
+          "artwork_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artwork Png B64"
+          },
+          "auxiliary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Auxiliary Fields"
+          },
+          "back_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Back Fields"
+          },
+          "background_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Background Color"
+          },
+          "background_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Background Png B64"
+          },
+          "barcode_alt_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Barcode Alt Text"
+          },
+          "barcode_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Barcode Format"
+          },
+          "barcode_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Barcode Message"
+          },
+          "contact_email": {
+            "title": "Contact Email",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "edit_token": {
+            "title": "Edit Token",
+            "type": "string"
+          },
+          "expiration_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expiration Date"
+          },
+          "featured_actions": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Featured Actions"
+          },
+          "footer_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Footer Fields"
+          },
+          "foreground_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Foreground Color"
+          },
+          "generate_logo": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Generate Logo"
+          },
+          "header_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Header Fields"
+          },
+          "icon_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Color"
+          },
+          "icon_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Png B64"
+          },
+          "icon_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Icon Text"
+          },
+          "info_links": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Info Links"
+          },
+          "label_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label Color"
+          },
+          "locations": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Locations"
+          },
+          "logo_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Logo Color"
+          },
+          "logo_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Logo Png B64"
+          },
+          "logo_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Logo Text"
+          },
+          "max_distance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Distance"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Organization Name"
+          },
+          "poster": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Poster"
+          },
+          "primary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Primary Fields"
+          },
+          "primary_logo_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Primary Logo Png B64"
+          },
+          "relevant_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Relevant Date"
+          },
+          "secondary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Secondary Fields"
+          },
+          "secondary_logo_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Secondary Logo Png B64"
+          },
+          "semantic_layout": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Semantic Layout"
+          },
+          "semantics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Semantics"
+          },
+          "serial_number": {
+            "title": "Serial Number",
+            "type": "string"
+          },
+          "strip_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strip Png B64"
+          },
+          "style": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Style"
+          },
+          "thumbnail_png_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thumbnail Png B64"
+          },
+          "transit_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Transit Type"
+          },
+          "voided": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Voided"
+          },
+          "x402_payment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "X402 Payment"
+          },
+          "x402_ready": {
+            "enum": [
+              true,
+              false,
+              "unknown"
+            ],
+            "title": "X402 Ready"
+          }
+        },
+        "required": [
+          "serial_number",
+          "edit_token",
+          "contact_email",
+          "x402_ready"
+        ],
+        "title": "update_wallet_passArguments",
+        "type": "object"
+      },
+      "name": "update_wallet_pass",
+      "title": "Update Apple Wallet pass"
+    },
+    "update_wallet_pass_batch": {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Update Apple Wallet passes in bulk"
+      },
+      "description": "Change every pass in a batch made with create_wallet_pass_batch (e.g. a new time or venue);\n    every iPhone that added one refreshes within seconds.\n\n    Paid: $0.01 per pass in the batch, as one x402 payment (refused first with the exact amount;\n    retry unchanged with x402_payment). Nothing is charged if the change doesn't build.\n\n    Each field list given replaces that list in the design (resend unchanged fields too; strings may\n    use {name} {ticket} {type} {email}). change_message (e.g. \"Doors now open at %@\") is shown on the\n    lock screen for fields whose value changed. contact_email and x402_ready are required.\n\n    Returns {batch_id, updated, notified_devices, charged, payment}.\n    ",
+      "inputSchema": {
+        "properties": {
+          "auxiliary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Auxiliary Fields"
+          },
+          "back_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Back Fields"
+          },
+          "batch_key": {
+            "title": "Batch Key",
+            "type": "string"
+          },
+          "change_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Change Message"
+          },
+          "contact_email": {
+            "title": "Contact Email",
+            "type": "string"
+          },
+          "header_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Header Fields"
+          },
+          "locations": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Locations"
+          },
+          "primary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Primary Fields"
+          },
+          "relevant_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Relevant Date"
+          },
+          "secondary_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Secondary Fields"
+          },
+          "x402_payment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "X402 Payment"
+          },
+          "x402_ready": {
+            "enum": [
+              true,
+              false,
+              "unknown"
+            ],
+            "title": "X402 Ready"
+          }
+        },
+        "required": [
+          "batch_key",
+          "contact_email",
+          "x402_ready"
+        ],
+        "title": "update_wallet_pass_batchArguments",
+        "type": "object"
+      },
+      "name": "update_wallet_pass_batch",
+      "title": "Update Apple Wallet passes in bulk"
+    }
+  }
+}
