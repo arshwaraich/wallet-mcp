@@ -10,6 +10,7 @@ Settling happens after the pass is built but before anything is handed over or s
 failed build costs the caller nothing and a failed settlement gets them nothing.
 """
 import base64
+import decimal
 import json
 import logging
 import os
@@ -36,37 +37,47 @@ class PaymentError(Exception):
 
 _lock = threading.Lock()
 _server = None
-_requirements = None
+_requirements: dict = {}  # number of passes -> the x402 requirements for that many
 
 
-def _resource_server():
-    """The x402 resource server and the price it charges, set up on first use because it asks
-    the facilitator which networks it supports."""
-    global _server, _requirements
+def price_for(count: int) -> str:
+    """The price of `count` passes as a "$" money string, e.g. 37 -> "$0.37"."""
+    return f"${decimal.Decimal(PRICE.lstrip('$')) * count}"
+
+
+def _resource_server(count: int = 1):
+    """The x402 resource server and the requirements for `count` passes. The server is set up on
+    first use because it asks the facilitator which networks it supports."""
+    global _server
     with _lock:
         if _server is None:
             from x402 import x402ResourceServerSync
             from x402.http import HTTPFacilitatorClientSync
             from x402.mechanisms.evm.exact import ExactEvmServerScheme
-            from x402.schemas import ResourceConfig
 
             server = x402ResourceServerSync(HTTPFacilitatorClientSync({"url": FACILITATOR_URL}))
             server.register(NETWORK, ExactEvmServerScheme())
             server.initialize()
-            _requirements = server.build_payment_requirements(
-                ResourceConfig(scheme="exact", pay_to=PAY_TO, price=PRICE, network=NETWORK)
-            )
             _server = server
-    return _server, _requirements
+        if count not in _requirements:
+            from x402.schemas import ResourceConfig
+
+            if len(_requirements) > 2000:
+                _requirements.clear()
+            _requirements[count] = _server.build_payment_requirements(
+                ResourceConfig(scheme="exact", pay_to=PAY_TO, price=price_for(count), network=NETWORK)
+            )
+    return _server, _requirements[count]
 
 
-def payment_required(resource_url: str, message: str) -> dict:
-    """An x402 v2 PaymentRequired body: the price, the network and where to pay."""
+def payment_required(resource_url: str, message: str, count: int = 1) -> dict:
+    """An x402 v2 PaymentRequired body: the price of `count` passes, the network and where to pay."""
     from x402.schemas import ResourceInfo
 
-    server, requirements = _resource_server()
+    server, requirements = _resource_server(count)
+    what = "one Wallet pass" if count == 1 else f"{count} Wallet passes at {PRICE} each"
     body = server.create_payment_required_response(
-        requirements, ResourceInfo(url=resource_url, description=f"one Wallet pass after the free first one of the day, {PRICE}"),
+        requirements, ResourceInfo(url=resource_url, description=f"{what}, {price_for(count)}"),
         message,
     )
     return body.model_dump(by_alias=True, exclude_none=True)
@@ -89,17 +100,18 @@ def _parse(raw):
         raise PaymentError("could not read the x402 payment: expected an x402 v2 PaymentPayload") from None
 
 
-def verify(raw):
-    """Check a payment with the facilitator; returns what settle() needs. Nothing is charged yet."""
+def verify(raw, count: int = 1):
+    """Check a payment for `count` passes with the facilitator; returns what settle() needs.
+    Nothing is charged yet."""
     payload = _parse(raw)
     try:
-        server, requirements = _resource_server()
+        server, requirements = _resource_server(count)
     except Exception as e:
         logger.error("x402 facilitator setup failed: %r", e)
         raise PaymentError("payments are unavailable right now; try again later") from None
     matched = server.find_matching_requirements(requirements, payload)
     if matched is None:
-        raise PaymentError(f"the payment doesn't match the price: {PRICE} in USDC on {NETWORK} to {PAY_TO}")
+        raise PaymentError(f"the payment doesn't match the price: {price_for(count)} in USDC on {NETWORK} to {PAY_TO}")
     try:
         result = server.verify_payment(payload, matched)
     except Exception as e:

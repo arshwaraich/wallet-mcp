@@ -94,6 +94,11 @@ server = MCPServer(
             "build is never charged. Setup guide: https://walletmcppass.com/#wallet-setup. Without x402, wait for the reset"
             if payments.enabled else ""
         )
+        + (
+            ". For many passes from one design (event tickets for a guest list), use create_wallet_pass_batch: "
+            f"permanent per-attendee links, paid from the first pass ({payments.PRICE} each, one x402 payment per call)"
+            if payments.enabled else ""
+        )
         + ". Passes are signed with this service's own "
         "certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this "
         "service, not by an airline or venue. A pass's barcode only works where the "
@@ -1228,11 +1233,15 @@ async def _pilot_body(request: Request):
     return body, None
 
 
-def _pilot_for(request: Request, key):
-    """(pilot, None) or (None, error response). Wrong key and unknown id look the same."""
+def _pilot_for(request: Request, key, allow_batch: bool = False):
+    """(pilot, None) or (None, error response). Wrong key and unknown id look the same. Paid batches
+    share the read-only routes (details, links.csv) but not the free issue/clean/update ones."""
     p = pilot.authenticate(request.path_params["id"], key)
     if p is None:
         return None, _pilot_error("invalid pilot key", 403)
+    if p["kind"] == "batch" and not allow_batch:
+        return None, _pilot_error("this is a paid batch: use create_wallet_pass_batch / update_wallet_pass_batch "
+                                  "(REST: /api/batches)", 403)
     return pilot.with_design(p), None
 
 
@@ -1246,7 +1255,7 @@ def _pilot_preview_path(pilot_id: str) -> Path:
 
 @server.custom_route("/api/pilot/{id}", methods=["GET"])
 async def api_pilot_get(request: Request) -> Response:
-    p, err = _pilot_for(request, request.query_params.get("key"))
+    p, err = _pilot_for(request, request.query_params.get("key"), allow_batch=True)
     if err:
         return err
     return JSONResponse({
@@ -1376,7 +1385,7 @@ def _csv_cell(value: str) -> str:
 
 @server.custom_route("/api/pilot/{id}/links.csv", methods=["GET"])
 async def api_pilot_links(request: Request) -> Response:
-    p, err = _pilot_for(request, request.query_params.get("key"))
+    p, err = _pilot_for(request, request.query_params.get("key"), allow_batch=True)
     if err:
         return err
     out = io.StringIO()
@@ -1452,6 +1461,493 @@ async def pilot_pass(request: Request) -> Response:
     return Response(row["pkpass"], media_type="application/vnd.apple.pkpass",
                     headers={"Last-Modified": formatdate(row["updated"], usegmt=True), "Cache-Control": "no-cache",
                              "Content-Disposition": 'inline; filename="pass.pkpass"'})
+
+
+# --- Paid batches: the organizer bulk upload (one design + attendee rows -> one permanent, updatable pass
+# link each) for any caller, over MCP (create_wallet_pass_batch / update_wallet_pass_batch) and REST
+# (/api/batches). Stored as pilots of kind 'batch'. No free tier: every new pass, and every pass re-signed by
+# a batch update, costs payments.PRICE, paid as one x402 payment for the whole call. ---
+
+BATCH_MAX_PASSES = int(os.environ.get("WALLET_MCP_BATCH_MAX_PASSES", 5000))
+BATCH_MAX_DAYS = 366  # event_end at most this far ahead (passes are stored until event_end + 7 days)
+BATCH_BUILDS_AT_ONCE = 2  # per call, so a big batch leaves BUILD_LIMITER slots for single passes
+_BATCH_DESIGN_EXCLUDED = ("serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready", "x402_payment")
+_BatchDesign = create_model(
+    "BatchDesign",
+    __config__=ConfigDict(extra="forbid"),
+    **{
+        name: (param.annotation, "eventTicket" if name == "style" else
+               ... if param.default is inspect.Parameter.empty else param.default)
+        for name, param in inspect.signature(_create_pass).parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY and name not in _BATCH_DESIGN_EXCLUDED
+    },
+)
+
+
+def _batch_lead(rejection: str | None, count: int) -> str:
+    each = f"{count} new pass{'' if count == 1 else 'es'} at {payments.PRICE} each = {payments.price_for(count)}"
+    return f"{rejection}: {each}" if rejection else f"Batches are paid: {each}"
+
+
+def _batch_payment_required(caller: Caller, tool: str, path: str, reason: str, count: int) -> PassRejected:
+    if caller.source == "mcp":
+        resource, how = f"mcp://tool/{tool}", "the signed payment as the x402_payment argument"
+    else:
+        resource, how = f"{PUBLIC_BASE_URL}{path}", "a PAYMENT-SIGNATURE header or an x402_payment body field"
+    message = (f"{reason} (USDC on Base, via x402). Retry this exact call with {how}; nothing is charged unless "
+               f"every pass builds. If this agent has no wallet yet, tell your user: setting up a Coinbase Agentic "
+               f"Wallet once lets the agent pay for things like this on its own. Wallet setup instructions: "
+               f"{X402_GUIDE_URL}")
+    try:
+        return PassRejected(message, 402, payments.payment_required(resource, message, count))
+    except Exception:
+        logger.error("x402 payment requirements unavailable: %s", traceback.format_exc())
+        return PassRejected("payments are unavailable right now; try again later", 503)
+
+
+def _batch_charge(caller: Caller, count: int, tool: str, path: str, action: str, style: str, org: str):
+    """Limits + payment for `count` passes: returns the verified (uncharged) payment or raises PassRejected."""
+    def refuse(error, status):
+        _log(caller, style=style, organization_name=org, success=False, error=error, duration_ms=0,
+             serial_number=None, action=action, refused=True)
+        raise PassRejected(error, status)
+
+    if not payments.enabled:
+        refuse("batches are paid and payments are not set up on this server", 503)
+    if not _pilot_disk_ok():
+        logger.error("refusing a batch: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
+        refuse("the service is temporarily out of capacity, try again later", 503)
+    fail = db.check_fail_limit(caller.ip, caller.contact_email)
+    if fail:
+        refuse(fail, 429)
+    over = db.check_paid_limit(caller.ip, count)
+    if over:
+        refuse(over, 429)
+    reason = None
+    if caller.payment is not None:
+        try:
+            return payments.verify(caller.payment, count)
+        except payments.PaymentError as e:
+            reason = str(e)
+    lead = _batch_lead(reason, count)
+    _log(caller, style=style, organization_name=org, success=False, error=lead, duration_ms=0, serial_number=None,
+         action=action, refused=True)
+    raise _batch_payment_required(caller, tool, path, lead, count)
+
+
+def _batch_settle(caller, verified, tool, path, count):
+    """Charge a verified payment; a failure becomes a fresh 402 (the caller wasn't charged)."""
+    try:
+        return payments.settle(verified)
+    except payments.PaymentError as e:
+        raise _batch_payment_required(caller, tool, path, str(e), count) from None
+
+
+def _batch_links_csv(p: dict, key: str) -> str:
+    return f"{PUBLIC_BASE_URL}/api/pilot/{p['id']}/links.csv?key={key}"
+
+
+async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, contact_email, x402_ready,
+                        x402_payment) -> dict:
+    """New batch (design + event_end) or more passes for an existing one (batch_key)."""
+    tool, start = "create_wallet_pass_batch", time.monotonic()
+    caller = caller.with_payment_argument(x402_payment)
+    d = design if isinstance(design, dict) else {}
+    caller = _with_caller_info(caller, contact_email, x402_ready, "create", str(d.get("style") or "eventTicket"),
+                               str(d.get("organization_name") or "batch"))
+    rows, message = _pilot_rows(rows)
+    if message:
+        raise PassRejected(message, 400)
+    key = batch_key
+    if batch_key is not None:
+        if design is not None or event_end is not None:
+            raise PassRejected("with batch_key, leave out design and event_end: the batch keeps its own "
+                               "(change the design with update_wallet_pass_batch)", 400)
+        found = pilot.authenticate(batch_key.split(".")[0], batch_key) if isinstance(batch_key, str) else None
+        if found is None or found["kind"] != "batch":
+            raise PassRejected("unknown batch_key", 404)
+        p, new_batch = pilot.with_design(found), False
+        if pilot.expires_epoch(p) <= time.time():
+            raise PassRejected("this batch's event has ended; no more passes can be issued", 400)
+    else:
+        if not isinstance(design, dict) or not isinstance(event_end, str):
+            raise PassRejected("a new batch needs design (create_wallet_pass's parameters, with {name} {ticket} "
+                               "{type} {email} placeholders) and event_end (ISO 8601)", 400)
+        try:
+            design = _BatchDesign.model_validate(design).model_dump(exclude_unset=True)
+            end = pilot.parse_end(event_end)
+        except ValidationError as e:
+            raise PassRejected(f"invalid design: {'; '.join(_validation_details(e))}", 400) from None
+        except ValueError:
+            raise PassRejected("event_end must be an ISO 8601 date or date-time, e.g. 2026-12-31T23:00:00Z", 400) from None
+        if end.timestamp() > time.time() + BATCH_MAX_DAYS * 86400:
+            raise PassRejected(f"event_end must be within {BATCH_MAX_DAYS} days", 400)
+        try:
+            made = await anyio.to_thread.run_sync(lambda: pilot.create(
+                design["organization_name"], design["description"], caller.contact_email, event_end, design,
+                BATCH_MAX_PASSES, keep_colors=True, kind="batch", sample_row=rows[0]), limiter=BUILD_LIMITER)
+        except ValueError as e:  # PassBuildError (bad design or image URL) or an event_end in the past
+            _log_failure(pass_builder.PassBuildError(str(e)), caller, "create", design.get("style", "eventTicket"),
+                         design["organization_name"], None, start)
+            raise PassRejected(f"the design doesn't build: {e}", 400) from None
+        p, key, new_batch = pilot.with_design(made["pilot"]), made["key"], True
+    style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
+    unique: dict = {}
+    for row in rows:
+        unique.setdefault(row["ticket"], row)
+    try:
+        async with _pilot_lock(p["id"]):
+            fresh = [t for t in unique if t not in pilot.live_tickets(p["id"])]
+            total = pilot.issued_count(p["id"])
+            if total + len(fresh) > p["max_passes"]:
+                raise PassRejected(f"a batch holds at most {p['max_passes']} passes; it has {total} and this call "
+                                   f"would add {len(fresh)}", 400)
+            verified = (await anyio.to_thread.run_sync(lambda: _batch_charge(
+                caller, len(fresh), tool, "/api/batches", "create", style, org)) if fresh else None)
+            results: dict = {}
+            sem = anyio.Semaphore(BATCH_BUILDS_AT_ONCE)
+
+            async def work(ticket, row):
+                async with sem:
+                    try:
+                        results[ticket] = await anyio.to_thread.run_sync(
+                            lambda: pilot.issue_one(p, row, caller.ip, logged=False), limiter=BUILD_LIMITER)
+                    except Exception as e:
+                        results[ticket] = e
+
+            async with anyio.create_task_group() as tg:
+                for ticket in unique:
+                    tg.start_soon(work, ticket, unique[ticket])
+            new_serials = [r["serial"] for r in results.values() if isinstance(r, dict) and r.get("new")]
+            failed = [(t, r) for t, r in results.items() if isinstance(r, Exception)]
+            if failed:
+                pilot.unissue(p["id"], new_serials)
+                ticket, e = failed[0]
+                built = isinstance(e, pass_builder.PassBuildError)
+                if not built:
+                    logger.error("batch pass build failed: %r", e)
+                _log_failure(e, caller, "create", style, org, None, start)
+                raise PassRejected(f"could not build the pass for {unique[ticket]['name']} ({ticket}): "
+                                   f"{e if built else 'internal error'}; nothing was charged", 400 if built else 500)
+            receipt = None
+            if verified:
+                try:
+                    receipt = await anyio.to_thread.run_sync(
+                        lambda: _batch_settle(caller, verified, tool, "/api/batches", len(fresh)))
+                except PassRejected:
+                    pilot.unissue(p["id"], new_serials)
+                    _log(caller, style=style, organization_name=org, success=False, error="payment settlement failed",
+                         duration_ms=int((time.monotonic() - start) * 1000), serial_number=None, action="create")
+                    raise
+    except BaseException:
+        if new_batch:
+            pilot.delete(p["id"])
+        raise
+    ms = int((time.monotonic() - start) * 1000) // max(len(new_serials), 1)
+    for serial in new_serials:
+        _log(caller, style=style, organization_name=org, success=True, error=None, duration_ms=ms,
+             serial_number=serial, payment_tx=receipt and receipt.get("transaction"))
+    passes, seen = [], set()
+    for row in rows:
+        r = results[row["ticket"]]
+        passes.append({"name": row["name"], "ticket": row["ticket"], "type": row["type"], "email": row["email"],
+                       "link": r["link"], "new": r["new"] and row["ticket"] not in seen})
+        seen.add(row["ticket"])
+    result = {"batch_id": p["id"], "passes": passes, "created": len(new_serials),
+              "reused": len(passes) - len(new_serials), "issued_total": pilot.issued_count(p["id"]),
+              "charged": payments.price_for(len(new_serials)) if receipt else "$0",
+              "links_csv_url": _batch_links_csv(p, key),
+              "updatable_until": _iso(pilot.expires_epoch(p))}
+    if new_batch:
+        result = {"batch_key": key, **result}
+    if receipt:
+        result["payment"] = receipt
+    return result
+
+
+async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x402_ready, x402_payment) -> dict:
+    """Merge changes into a batch's design, re-sign every live pass in it, and push them to iPhones."""
+    tool, start = "update_wallet_pass_batch", time.monotonic()
+    caller = caller.with_payment_argument(x402_payment)
+    found = pilot.authenticate(batch_key.split(".")[0], batch_key) if isinstance(batch_key, str) else None
+    if found is None or found["kind"] != "batch":
+        raise PassRejected("unknown batch_key", 404)
+    p = pilot.with_design(found)
+    style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
+    caller = _with_caller_info(caller, contact_email, x402_ready, "update", style, org)
+    try:
+        changes = pilot.validate_changes(changes)
+    except ValueError as e:
+        raise PassRejected(str(e), 400) from None
+    async with _pilot_lock(p["id"]):
+        targets = pilot.issued_rows(p["id"])
+        if not targets:
+            raise PassRejected("this batch has no live passes to update", 400)
+        merged = pilot.merge_changes(p["design_obj"], changes)
+
+        def check_all():
+            """Every pass's contents must be valid before anything is charged: the sample is signed (images,
+            size), the rest only have their pass.json built, which is where per-attendee values can fail."""
+            _build_pkpass(pilot.fill(merged, targets[0]), str(uuid.uuid4()), None)
+            for row in targets:
+                filled = pilot.fill(merged, row)
+                try:
+                    pass_builder.build_pass_json(**{k: filled.get(k) for k in _PASS_JSON_PARAMS if k in filled},
+                                                 serial_number=row["serial"], web_service_url="https://x",
+                                                 authentication_token=row["auth_token"])
+                except pass_builder.PassBuildError as e:
+                    raise pass_builder.PassBuildError(f"{row['name']} ({row['ticket']}): {e}") from None
+
+        try:
+            await anyio.to_thread.run_sync(check_all, limiter=BUILD_LIMITER)
+        except pass_builder.PassBuildError as e:
+            _log_failure(e, caller, "update", style, org, None, start)
+            raise PassRejected(f"that change would not build: {e}; nothing was charged", 400) from None
+        verified = await anyio.to_thread.run_sync(lambda: _batch_charge(
+            caller, len(targets), tool, f"/api/batches/{p['id']}", "update", style, org))
+        receipt = await anyio.to_thread.run_sync(
+            lambda: _batch_settle(caller, verified, tool, f"/api/batches/{p['id']}", len(targets)))
+        pilot.save_design(p["id"], merged)
+        p["design_obj"] = merged
+        done, failed = [], 0
+        sem = anyio.Semaphore(BATCH_BUILDS_AT_ONCE)
+
+        async def work(row):
+            nonlocal failed
+            async with sem:
+                try:
+                    if await anyio.to_thread.run_sync(lambda: _rebuild_batch_pass(p, row), limiter=BUILD_LIMITER):
+                        done.append(row["serial"])
+                except Exception:
+                    failed += 1
+                    logger.error("batch update rebuild failed: %s", traceback.format_exc())
+
+        async with anyio.create_task_group() as tg:
+            for row in targets:
+                tg.start_soon(work, row)
+        tokens = await anyio.to_thread.run_sync(pilot.all_push_tokens, done)
+        notified, dead = await anyio.to_thread.run_sync(apns.push, tokens)
+        pilot.drop_dead_tokens(dead)
+    ms = int((time.monotonic() - start) * 1000) // max(len(targets), 1)
+    for row in targets:
+        ok = row["serial"] in done
+        _log(caller, style=style, organization_name=org, success=ok, error=None if ok else "rebuild failed after payment",
+             duration_ms=ms, serial_number=row["serial"], action="update", payment_tx=receipt.get("transaction"))
+    result = {"batch_id": p["id"], "updated": len(done), "notified_devices": notified,
+              "charged": payments.price_for(len(targets)), "payment": receipt}
+    if failed:
+        result["failed"] = failed
+    return result
+
+
+def _rebuild_batch_pass(p: dict, row: dict) -> bool:
+    stored = db.get_pass(row["serial"])
+    if stored is None:
+        return False
+    params = pilot.fill(p["design_obj"], row)
+    pkpass = _build_pkpass(params, row["serial"], stored["auth_token"])
+    db.replace_pass(row["serial"], json.dumps(params), pkpass, max(int(time.time()), stored["updated"] + 1))
+    return True
+
+
+_BATCH_TOOL_ANNOTATIONS = dict(read_only_hint=False, idempotent_hint=False, open_world_hint=False)
+
+
+@server.tool(
+    title="Create Apple Wallet passes in bulk",
+    annotations=ToolAnnotations(title="Create Apple Wallet passes in bulk", destructive_hint=False,
+                                **_BATCH_TOOL_ANNOTATIONS),
+)
+async def create_wallet_pass_batch(
+    ctx: Context,
+    rows: list[dict],
+    design: dict | None = None,
+    event_end: str | None = None,
+    batch_key: str | None = None,
+    contact_email: str | None = None,
+    x402_ready: bool | Literal["unknown"] | None = None,
+    x402_payment: dict | str | None = None,
+) -> dict:
+    """Create one Apple Wallet pass per attendee from a single design, e.g. tickets for a guest list.
+
+    Paid, with no free tier: each new pass costs {price} in USDC on Base via x402, charged as one
+    payment for the whole call ({price} x the number of new passes). The first call is refused with
+    the exact amount; retry it unchanged with the signed payment in x402_payment. Nothing is charged
+    unless every pass builds. A row whose ticket is already in the batch is not charged again and gets
+    the same link.
+
+    Each pass gets a permanent https link (not the 1-hour download link of create_wallet_pass) that
+    always serves the latest version, and stays installable and updatable until event_end + 7 days.
+    Send the links to attendees yourself (email, WhatsApp, a form); this service sends nothing.
+
+    Args:
+        rows: up to 1000 attendees per call (5000 per batch), each {"name": str, "ticket": str,
+            "type": optional str (default "General admission"), "email": optional str}. ticket is
+            the unique id within the batch (and the default barcode message). Parse a CSV into
+            these rows yourself.
+        design: for a new batch, create_wallet_pass's parameters (style, organization_name,
+            description, colors, fields, images, ...; not serial_number/updatable/contact_email)
+            whose strings may contain {name} {ticket} {type} {email}, filled in per attendee.
+            Defaults: style "eventTicket", barcode_message "{ticket}". Leave out with batch_key.
+        event_end: for a new batch, when the event ends (ISO 8601, within a year). Leave out with batch_key.
+        batch_key: to add attendees to a batch made earlier, the batch_key it returned.
+        contact_email, x402_ready, x402_payment: as for create_wallet_pass (all calls are paid here).
+
+    Returns {batch_key (new batch only: it can't be recovered, give it to the user), batch_id,
+    passes: [{name, ticket, type, email, link, new}], created, reused, issued_total, charged,
+    links_csv_url (all links as a CSV, also secret), updatable_until, payment}.
+    """
+    caller = Caller.from_mcp(ctx)
+    try:
+        return _mcp_result(await _create_batch(
+            caller, design=design, rows=rows, event_end=event_end, batch_key=batch_key,
+            contact_email=contact_email, x402_ready=x402_ready, x402_payment=x402_payment))
+    except PassRejected as e:
+        return _mcp_rejection(e)
+
+
+@server.tool(
+    title="Update Apple Wallet passes in bulk",
+    annotations=ToolAnnotations(title="Update Apple Wallet passes in bulk", destructive_hint=True,
+                                **_BATCH_TOOL_ANNOTATIONS),
+)
+async def update_wallet_pass_batch(
+    ctx: Context,
+    batch_key: str,
+    header_fields: list[dict] | None = None,
+    primary_fields: list[dict] | None = None,
+    secondary_fields: list[dict] | None = None,
+    auxiliary_fields: list[dict] | None = None,
+    back_fields: list[dict] | None = None,
+    relevant_date: str | None = None,
+    locations: list[dict] | None = None,
+    change_message: str | None = None,
+    contact_email: str | None = None,
+    x402_ready: bool | Literal["unknown"] | None = None,
+    x402_payment: dict | str | None = None,
+) -> dict:
+    """Change every pass in a batch made with create_wallet_pass_batch (e.g. a new time or venue);
+    every iPhone that added one refreshes within seconds.
+
+    Paid: {price} per pass in the batch, as one x402 payment (refused first with the exact amount;
+    retry unchanged with x402_payment). Nothing is charged if the change doesn't build.
+
+    Each field list given replaces that list in the design (resend unchanged fields too; strings may
+    use {name} {ticket} {type} {email}). change_message (e.g. "Doors now open at %@") is shown on the
+    lock screen for fields whose value changed. contact_email and x402_ready are required.
+
+    Returns {batch_id, updated, notified_devices, charged, payment}.
+    """
+    changes = {k: v for k, v in locals().items()
+               if k not in ("ctx", "batch_key", "contact_email", "x402_ready", "x402_payment")}
+    caller = Caller.from_mcp(ctx)
+    try:
+        return _mcp_result(await _update_batch(
+            caller, batch_key=batch_key, changes=changes, contact_email=contact_email, x402_ready=x402_ready,
+            x402_payment=x402_payment))
+    except PassRejected as e:
+        return _mcp_rejection(e)
+
+
+for _tool in (create_wallet_pass_batch, update_wallet_pass_batch):
+    _tool_obj = server._tool_manager.get_tool(_tool.__name__)
+    _tool_obj.description = _tool_obj.description.replace("{price}", payments.PRICE)
+    _schema = _tool_obj.parameters
+    _schema["required"] = [*_schema["required"], "contact_email", "x402_ready"]
+    _schema["properties"]["contact_email"] = {"type": "string", "title": "Contact Email"}
+    _schema["properties"]["x402_ready"] = {"enum": [True, False, "unknown"], "title": "X402 Ready"}
+
+
+async def _batch_api_body(request: Request):
+    body, err = await _pilot_body(request)
+    if err:
+        return None, None, err
+    caller = Caller.from_api(request)
+    return body, caller, None
+
+
+_BATCH_CREATE_KEYS = {"rows", "design", "event_end", "contact_email", "x402_ready", "x402_payment"}
+_BATCH_UPDATE_KEYS = {*pilot.UPDATE_KEYS, "contact_email", "x402_ready", "x402_payment"}
+
+
+def _bearer(request: Request) -> str | None:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    return token.strip() if scheme.lower() == "bearer" and token.strip() else None
+
+
+async def _batch_api(run) -> Response:
+    try:
+        return _api_result(await run())
+    except PassRejected as e:
+        return _api_rejection(e)
+    except Exception:
+        logger.error("batch API failed: %s", traceback.format_exc())
+        return JSONResponse({"error": "internal error"}, status_code=500)
+
+
+@server.custom_route("/api/batches", methods=["POST"])
+async def api_create_batch(request: Request) -> Response:
+    """New batch: {design, event_end, rows, contact_email, x402_ready[, x402_payment]}."""
+    body, caller, err = await _batch_api_body(request)
+    if err:
+        return err
+    unknown = set(body) - _BATCH_CREATE_KEYS
+    if unknown:
+        return _pilot_error(f"unknown field(s): {', '.join(sorted(unknown))}")
+    return await _batch_api(lambda: _create_batch(caller, batch_key=None, **{k: body.get(k) for k in _BATCH_CREATE_KEYS}))
+
+
+@server.custom_route("/api/batches/{id}/passes", methods=["POST"])
+async def api_add_to_batch(request: Request) -> Response:
+    """More attendees: {rows, contact_email, x402_ready[, x402_payment]}, batch_key as Bearer."""
+    key = _bearer(request)
+    if not key or not key.startswith(request.path_params["id"] + "."):
+        return JSONResponse({"error": "send the batch_key as 'Authorization: Bearer <batch_key>'"}, status_code=401)
+    body, caller, err = await _batch_api_body(request)
+    if err:
+        return err
+    unknown = set(body) - (_BATCH_CREATE_KEYS - {"design", "event_end"})
+    if unknown:
+        return _pilot_error(f"unknown field(s): {', '.join(sorted(unknown))}")
+    return await _batch_api(lambda: _create_batch(caller, batch_key=key, design=None, event_end=None,
+                                                  **{k: body.get(k) for k in _BATCH_CREATE_KEYS - {"design", "event_end"}}))
+
+
+@server.custom_route("/api/batches/{id}", methods=["PATCH"])
+async def api_update_batch(request: Request) -> Response:
+    """Change every pass: {header_fields, ..., change_message, contact_email, x402_ready[, x402_payment]}."""
+    key = _bearer(request)
+    if not key or not key.startswith(request.path_params["id"] + "."):
+        return JSONResponse({"error": "send the batch_key as 'Authorization: Bearer <batch_key>'"}, status_code=401)
+    body, caller, err = await _batch_api_body(request)
+    if err:
+        return err
+    unknown = set(body) - _BATCH_UPDATE_KEYS
+    if unknown:
+        return _pilot_error(f"unknown field(s): {', '.join(sorted(unknown))}")
+    changes = {k: body[k] for k in pilot.UPDATE_KEYS if k in body}
+    return await _batch_api(lambda: _update_batch(caller, batch_key=key, changes=changes,
+                                                  contact_email=body.get("contact_email"),
+                                                  x402_ready=body.get("x402_ready"),
+                                                  x402_payment=body.get("x402_payment")))
+
+
+@server.custom_route("/api/batches/{id}", methods=["GET"])
+async def api_get_batch(request: Request) -> Response:
+    """The batch and every link, batch_key as Bearer (or ?key= for a browser)."""
+    key = _bearer(request) or request.query_params.get("key")
+    found = pilot.authenticate(request.path_params["id"], key)
+    if found is None or found["kind"] != "batch":
+        return JSONResponse({"error": "unknown batch or wrong batch_key"}, status_code=404)
+    p = pilot.with_design(found)
+    passes = [{"name": r["name"], "ticket": r["ticket"], "type": r["type"], "email": r["email"],
+               "link": pilot.pass_link(r["serial"], r["auth_token"])} for r in pilot.issued_rows(p["id"])]
+    return JSONResponse({"batch_id": p["id"], "organization_name": p["org"], "description": p["event_name"],
+                         "event_end": p["event_end"], "updatable_until": _iso(pilot.expires_epoch(p)),
+                         "issued_total": len(passes), "max_passes": p["max_passes"], "design": p["design_obj"],
+                         "passes": passes, "links_csv_url": _batch_links_csv(p, key)},
+                        headers={"Cache-Control": "no-store"})
+
 
 
 pilot.configure(_build_pkpass, _resolve_image_urls, PUBLIC_BASE_URL)
