@@ -158,6 +158,21 @@ def init() -> None:
             )
             """
         )
+        # New versions of passes built by a paid batch update, held here until the payment settles and
+        # then swapped into `passes` in one transaction (or discarded). On disk, not in memory: a batch
+        # holds up to 5000 passes of up to 10 MB. Rows outlive a call only if the process dies mid-update.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_staging (
+                stage TEXT NOT NULL,
+                serial TEXT NOT NULL,
+                params TEXT NOT NULL,
+                pkpass BLOB NOT NULL,
+                created INTEGER NOT NULL,
+                PRIMARY KEY (stage, serial)
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ip ON requests(ip)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_email ON requests(LOWER(contact_email))")
@@ -332,6 +347,45 @@ def replace_pass(serial: str, params: str, pkpass: bytes, updated: int) -> None:
             "UPDATE passes SET params = ?, pkpass = ?, updated = ? WHERE serial = ?",
             (params, pkpass, updated, serial),
         )
+
+
+STAGE_MAX_AGE_SECONDS = 24 * 3600  # staged versions older than this belong to a call that died
+
+
+def stage_pass(stage: str, serial: str, params: str, pkpass: bytes) -> None:
+    with _lock, _conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO pass_staging (stage, serial, params, pkpass, created) VALUES (?, ?, ?, ?, ?)",
+                     (stage, serial, params, pkpass, int(time.time())))
+
+
+def discard_stage(stage: str) -> None:
+    with _lock, _conn() as conn:
+        conn.execute("DELETE FROM pass_staging WHERE stage = ?", (stage,))
+
+
+def swap_stage(stage: str, extra_sql: str | None = None, extra_args: tuple = ()) -> int:
+    """In one transaction: replace every pass staged under `stage` with its staged version (bumping
+    `updated` like replace_pass), run extra_sql (e.g. saving the batch's new design) and drop the stage.
+    Returns how many passes were replaced. On any error nothing changes (the stage is kept)."""
+    now = int(time.time())
+    with _lock, _conn() as conn:
+        replaced = conn.execute(
+            """UPDATE passes SET
+                   params = (SELECT s.params FROM pass_staging s WHERE s.stage = ? AND s.serial = passes.serial),
+                   pkpass = (SELECT s.pkpass FROM pass_staging s WHERE s.stage = ? AND s.serial = passes.serial),
+                   updated = MAX(?, updated + 1)
+               WHERE serial IN (SELECT serial FROM pass_staging WHERE stage = ?)""",
+            (stage, stage, now, stage)).rowcount
+        if extra_sql:
+            conn.execute(extra_sql, extra_args)
+        conn.execute("DELETE FROM pass_staging WHERE stage = ?", (stage,))
+    return replaced
+
+
+def purge_stale_stages() -> int:
+    with _lock, _conn() as conn:
+        return conn.execute("DELETE FROM pass_staging WHERE created < ?",
+                            (int(time.time()) - STAGE_MAX_AGE_SECONDS,)).rowcount
 
 
 def register_device(device: str, serial: str, push_token: str) -> bool | None:

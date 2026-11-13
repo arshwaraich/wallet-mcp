@@ -249,6 +249,54 @@ try:
     pj = pass_json(httpx.get(links["T-2"]).content)
     sf = pj["eventTicket"]["secondaryFields"][0]
     check("link now serves the new value with the changeMessage", sf["value"] == "8pm" and sf["changeMessage"] == "Doors now %@", sf)
+    # --- #5: a failed settlement on update leaves every pass and the saved design as they were ---
+    def batch_state(batch_id):
+        with sqlite3.connect(db_path) as c:
+            design = c.execute("SELECT design FROM pilots WHERE id = ?", (batch_id,)).fetchone()[0]
+            passes = c.execute("SELECT p.serial, p.pkpass, p.updated, p.params FROM pilot_passes pp "
+                               "JOIN passes p ON p.serial = pp.serial WHERE pp.pilot_id = ? ORDER BY p.serial",
+                               (batch_id,)).fetchall()
+            staged = c.execute("SELECT COUNT(*) FROM pass_staging").fetchone()[0]
+        return design, passes, staged
+
+    def paid_rows():
+        return [x for x in requests_rows() if x[4]]
+
+    before, paid_before = batch_state(bid), len(paid_rows())
+    ch9 = {"secondary_fields": [{"key": "doors", "label": "Doors", "value": "9pm"}], **CALLER}
+    q = httpx.patch(f"{base}/api/batches/{bid}", json=ch9, headers=auth, timeout=30)
+    settles = sum(1 for p_, _ in seen if p_.endswith("/settle"))
+    mode["settle"] = False
+    r = httpx.patch(f"{base}/api/batches/{bid}", json=ch9, headers={**auth, **hdr(sign(q.json()))}, timeout=60)
+    mode["settle"] = True
+    after = batch_state(bid)
+    sf = pass_json(httpx.get(links["T-2"]).content)["eventTicket"]["secondaryFields"][0]
+    check("update whose settlement fails -> 402 'not charged', settlement was tried",
+          r.status_code == 402 and "not charged" in r.json()["error"]
+          and sum(1 for p_, _ in seen if p_.endswith("/settle")) == settles + 1, r.text)
+    check("... pass content, updated stamps and saved design unchanged, staging emptied",
+          after == (before[0], before[1], 0) and sf["value"] == "8pm" and "9pm" not in after[0], (sf, after[2]))
+    check("... no paid rows logged", len(paid_rows()) == paid_before, paid_rows())
+
+    # --- #5: only live passes are rebuilt and charged ---
+    t3 = links["T-3"].split("/pass/")[1].split("/")[0]
+    with sqlite3.connect(db_path) as c:
+        c.execute("UPDATE passes SET expires = ? WHERE serial = ?", (int(time.time()) - 1, t3))
+        t3_before = c.execute("SELECT pkpass, updated FROM passes WHERE serial = ?", (t3,)).fetchone()
+    q = httpx.patch(f"{base}/api/batches/{bid}", json=ch9, headers=auth, timeout=30)
+    check("with one pass expired, the update quote is for the 3 live ones",
+          q.status_code == 402 and q.json()["accepts"][0]["amount"] == "30000", q.text)
+    r = httpx.patch(f"{base}/api/batches/{bid}", json=ch9, headers={**auth, **hdr(sign(q.json()))}, timeout=60)
+    with sqlite3.connect(db_path) as c:
+        t3_after = c.execute("SELECT pkpass, updated FROM passes WHERE serial = ?", (t3,)).fetchone()
+        n_staged = c.execute("SELECT COUNT(*) FROM pass_staging").fetchone()[0]
+    sf = pass_json(httpx.get(links["T-2"]).content)["eventTicket"]["secondaryFields"][0]
+    check("paid update re-signs and charges the 3 live passes only",
+          r.status_code == 200 and r.json()["updated"] == 3 and r.json()["charged"] == "$0.03"
+          and sf["value"] == "9pm" and t3_after == t3_before and n_staged == 0, r.text)
+    check("... logged 3 paid update rows", sum(1 for x in paid_rows() if x[1] == "update") == 4 + 3,
+          [x for x in paid_rows() if x[1] == "update"])
+
     badch = {"barcode_format": "x", **CALLER}
     r = httpx.patch(f"{base}/api/batches/{bid}", json=badch, headers=auth)
     check("unknown update key -> 400", r.status_code == 400, r.text)
@@ -272,6 +320,17 @@ try:
     res = asyncio.run(mcp_call("update_wallet_pass_batch", {"batch_key": mkey, "relevant_date": END, **CALLER,
                                                             "x402_payment": sign(res.structured_content)}))
     check("MCP paid batch update", not res.is_error and (res.structured_content or {}).get("updated") == 1, res)
+
+    # --- #5: once the event window has ended, an update is refused before any payment work ---
+    mbid, mauth = mkey.split(".")[0], {"authorization": f"Bearer {mkey}"}
+    q = httpx.patch(f"{base}/api/batches/{mbid}", json=ch, headers=mauth, timeout=30)
+    with sqlite3.connect(db_path) as c:
+        c.execute("UPDATE pilots SET event_end_epoch = ? WHERE id = ?", (int(time.time()) - 8 * 86400, mbid))
+    calls, paid_before, before = len(seen), len(paid_rows()), batch_state(mbid)
+    r = httpx.patch(f"{base}/api/batches/{mbid}", json=ch, headers={**mauth, **hdr(sign(q.json()))}, timeout=30)
+    check("update of a batch whose event window ended -> 400, nothing verified or settled or changed",
+          q.status_code == 402 and r.status_code == 400 and "ended" in r.json()["error"] and len(seen) == calls
+          and len(paid_rows()) == paid_before and batch_state(mbid) == before, (q.status_code, r.text))
 
     async def list_tools():
         async with streamable_http_client(f"{base}/mcp") as (read, write):

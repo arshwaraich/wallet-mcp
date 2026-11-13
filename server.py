@@ -16,6 +16,7 @@ limit; past it, a caller can pay per call with x402 (payments.py) instead of
 being refused, without any change to the tool interface.
 """
 import base64
+import contextlib
 import csv
 import datetime
 import hashlib
@@ -126,6 +127,7 @@ def _sweep_downloads() -> None:
             if purged:
                 logger.info("deleted %d updatable pass(es) whose update window ended", purged)
             pilot.purge_orphans()
+            db.purge_stale_stages()
         except Exception:
             logger.error("purging expired passes failed: %s", traceback.format_exc())
         now = time.time()
@@ -1320,6 +1322,89 @@ def _pilot_rows(raw):
     return rows, None
 
 
+# --- The engine shared by organizer pilots (free, set up by the operator) and paid batches. The real
+# differences are parameters: batches log only once paid (logged=False), cap their own concurrent builds
+# (at_once) so a big batch leaves BUILD_LIMITER slots for single passes, roll back a partial issue, and
+# stage an update's new versions until the payment settles (stage=). ---
+
+def _unique_rows(rows: list[dict]) -> dict:
+    """ticket -> the first row with that ticket (repeats of a ticket get the same pass)."""
+    unique: dict = {}
+    for row in rows:
+        unique.setdefault(row["ticket"], row)
+    return unique
+
+
+def _at_most(at_once: int | None):
+    return anyio.Semaphore(at_once) if at_once else contextlib.nullcontext()
+
+
+async def issue_rows(p: dict, unique: dict, ip: str, *, logged: bool = True, at_once: int | None = None) -> dict:
+    """Issue (or find) the pass for every unique row, concurrently: ticket -> pilot.issue_one's result, or the
+    exception it raised. Nothing is rolled back here: a caller that wants all-or-nothing unissues."""
+    results: dict = {}
+    limit = _at_most(at_once)
+
+    async def work(ticket, row):
+        async with limit:
+            try:
+                results[ticket] = await anyio.to_thread.run_sync(
+                    lambda: pilot.issue_one(p, row, ip, logged), limiter=BUILD_LIMITER)
+            except Exception as e:
+                if not isinstance(e, pass_builder.PassBuildError):
+                    logger.error("issuing a pass failed: %s", traceback.format_exc())
+                results[ticket] = e
+
+    async with anyio.create_task_group() as tg:
+        for ticket, row in unique.items():
+            tg.start_soon(work, ticket, row)
+    return results
+
+
+def assemble_passes(rows: list[dict], results: dict) -> list[dict]:
+    """One entry per requested row, in request order; a repeated ticket has the same link and new=False."""
+    passes, seen = [], set()
+    for row in rows:
+        r = results[row["ticket"]]
+        passes.append({**row, "link": r["link"], "new": r["new"] and row["ticket"] not in seen})
+        seen.add(row["ticket"])
+    return passes
+
+
+async def rebuild_all(p: dict, targets: list[dict], ip: str, *, logged: bool = True, at_once: int | None = None,
+                      stage: str | None = None) -> tuple[list[str], list[Exception]]:
+    """Rebuild every target's pass from p['design_obj'], concurrently. Returns (serials rebuilt, errors); a
+    pass that is gone is in neither. With stage, the new versions go to db.pass_staging instead of going
+    live, and the first error stops the remaining builds (the whole update is refused anyway)."""
+    done, errors = [], []
+    limit = _at_most(at_once)
+
+    async def work(row):
+        async with limit:
+            if errors and stage:
+                return
+            try:
+                if await anyio.to_thread.run_sync(lambda: pilot.rebuild_one(p, row, ip, logged, stage),
+                                                  limiter=BUILD_LIMITER):
+                    done.append(row["serial"])
+            except Exception as e:
+                errors.append(e)
+                logger.error("rebuilding a pass failed: %s", traceback.format_exc())
+
+    async with anyio.create_task_group() as tg:
+        for row in targets:
+            tg.start_soon(work, row)
+    return done, errors
+
+
+async def push_updates(serials: list[str]) -> int:
+    """APNs push to every device holding one of these passes; drops tokens APNs says are dead."""
+    tokens = await anyio.to_thread.run_sync(pilot.all_push_tokens, serials)
+    notified, dead = await anyio.to_thread.run_sync(apns.push, tokens)
+    pilot.drop_dead_tokens(dead)
+    return notified
+
+
 @server.custom_route("/api/pilot/{id}/issue", methods=["POST"])
 async def api_pilot_issue(request: Request) -> Response:
     body, err = await _pilot_body(request)
@@ -1336,9 +1421,7 @@ async def api_pilot_issue(request: Request) -> Response:
     if not _pilot_disk_ok():
         return _pilot_error("the service is temporarily out of capacity, try again later", 503)
     ip = _client_ip(request)
-    unique: dict = {}
-    for row in rows:
-        unique.setdefault(row["ticket"], row)
+    unique = _unique_rows(rows)
     async with _pilot_lock(p["id"]):
         live = pilot.live_tickets(p["id"])
         fresh = [t for t in unique if t not in live]
@@ -1346,32 +1429,14 @@ async def api_pilot_issue(request: Request) -> Response:
         if total + len(fresh) > p["max_passes"]:
             return _pilot_error(f"this pilot is limited to {p['max_passes']} passes; {total} are issued and this "
                                 f"request would add {len(fresh)} more")
-        results: dict = {}
-
-        async def work(ticket, row):
-            try:
-                results[ticket] = await anyio.to_thread.run_sync(
-                    lambda: pilot.issue_one(p, row, ip), limiter=BUILD_LIMITER)
-            except Exception as e:
-                if not isinstance(e, pass_builder.PassBuildError):
-                    logger.error("pilot issue failed: %s", traceback.format_exc())
-                results[ticket] = e
-
-        async with anyio.create_task_group() as tg:
-            for ticket, row in unique.items():
-                tg.start_soon(work, ticket, row)
+        results = await issue_rows(p, unique, ip)
         for ticket, r in results.items():
             if isinstance(r, Exception):
                 who = unique[ticket]["name"]
                 msg = str(r) if isinstance(r, pass_builder.PassBuildError) else "internal error building the pass"
                 return _pilot_error(f"could not build the pass for {who} ({ticket}): {msg}",
                                     400 if isinstance(r, pass_builder.PassBuildError) else 500)
-        passes, seen = [], set()
-        for row in rows:
-            r = results[row["ticket"]]
-            first = row["ticket"] not in seen
-            seen.add(row["ticket"])
-            passes.append({**row, "link": r["link"], "new": r["new"] and first})
+        passes = assemble_passes(rows, results)
         created = sum(1 for x in passes if x["new"])
         return JSONResponse({"passes": passes, "created": created, "reused": len(passes) - created,
                              "issued_total": pilot.issued_count(p["id"])})
@@ -1426,23 +1491,9 @@ async def api_pilot_update(request: Request) -> Response:
         targets = [{**r, "serial": r["serial"]} for r in pilot.issued_rows(p["id"])]
         if p["sample_serial"]:
             targets.append({**pilot.SAMPLE_ROW, "serial": p["sample_serial"]})
-        done, failed = [], 0
-
-        async def work(row):
-            nonlocal failed
-            try:
-                if await anyio.to_thread.run_sync(lambda: pilot.rebuild_one(p, row, ip), limiter=BUILD_LIMITER):
-                    done.append(row["serial"])
-            except Exception:
-                failed += 1
-                logger.error("pilot update rebuild failed: %s", traceback.format_exc())
-
-        async with anyio.create_task_group() as tg:
-            for row in targets:
-                tg.start_soon(work, row)
-        tokens = await anyio.to_thread.run_sync(pilot.all_push_tokens, done)
-        notified, dead = await anyio.to_thread.run_sync(apns.push, tokens)
-        pilot.drop_dead_tokens(dead)
+        done, errors = await rebuild_all(p, targets, ip)
+        failed = len(errors)
+        notified = await push_updates(done)
     attendees = len(done) - (1 if p["sample_serial"] in done else 0)
     result = {"updated": attendees, "notified_devices": notified}
     if failed:
@@ -1515,9 +1566,7 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
             raise PassRejected(f"event_end must be within {BATCH_MAX_DAYS} days", 400)
         if end.timestamp() + pilot.GRACE_SECONDS <= time.time():
             raise PassRejected("the design doesn't build: event end is in the past", 400)
-    unique: dict = {}
-    for row in rows:
-        unique.setdefault(row["ticket"], row)
+    unique = _unique_rows(rows)
     verified = None
     if batch_key is None:
         # Only cheap checks before the payment gate: an unpaid call must not fetch images, sign anything or
@@ -1557,28 +1606,13 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
                 verified = await anyio.to_thread.run_sync(lambda: _gate(
                     caller, len(fresh), free_tier=False, tool=tool, path="/api/batches", action="create",
                     style=style, org=org))
-            results: dict = {}
-            sem = anyio.Semaphore(BATCH_BUILDS_AT_ONCE)
-
-            async def work(ticket, row):
-                async with sem:
-                    try:
-                        results[ticket] = await anyio.to_thread.run_sync(
-                            lambda: pilot.issue_one(p, row, caller.ip, logged=False), limiter=BUILD_LIMITER)
-                    except Exception as e:
-                        results[ticket] = e
-
-            async with anyio.create_task_group() as tg:
-                for ticket in unique:
-                    tg.start_soon(work, ticket, unique[ticket])
+            results = await issue_rows(p, unique, caller.ip, logged=False, at_once=BATCH_BUILDS_AT_ONCE)
             new_serials = [r["serial"] for r in results.values() if isinstance(r, dict) and r.get("new")]
             failed = [(t, r) for t, r in results.items() if isinstance(r, Exception)]
             if failed:
                 pilot.unissue(p["id"], new_serials)
                 ticket, e = failed[0]
                 built = isinstance(e, pass_builder.PassBuildError)
-                if not built:
-                    logger.error("batch pass build failed: %r", e)
                 _log_failure(e, caller, "create", style, org, None, start)
                 raise PassRejected(f"could not build the pass for {unique[ticket]['name']} ({ticket}): "
                                    f"{e if built else 'internal error'}; nothing was charged", 400 if built else 500)
@@ -1597,12 +1631,7 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
     for serial in new_serials:
         _log(caller, style=style, organization_name=org, success=True, error=None, duration_ms=ms,
              serial_number=serial, payment_tx=receipt and receipt.get("transaction"))
-    passes, seen = [], set()
-    for row in rows:
-        r = results[row["ticket"]]
-        passes.append({"name": row["name"], "ticket": row["ticket"], "type": row["type"], "email": row["email"],
-                       "link": r["link"], "new": r["new"] and row["ticket"] not in seen})
-        seen.add(row["ticket"])
+    passes = assemble_passes(rows, results)
     result = {"batch_id": p["id"], "passes": passes, "created": len(new_serials),
               "reused": len(passes) - len(new_serials), "issued_total": pilot.issued_count(p["id"]),
               "charged": payments.price_for(len(new_serials)) if receipt else "$0",
@@ -1616,7 +1645,10 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
 
 
 async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x402_ready, x402_payment) -> dict:
-    """Merge changes into a batch's design, re-sign every live pass in it, and push them to iPhones."""
+    """Merge changes into a batch's design, re-sign every live pass in it, and push them to iPhones.
+    Charged per live pass, and only once every new version is built: they are built into db.pass_staging,
+    the payment is settled, and then they and the new design go live in one transaction (#5). A failed
+    build or settlement leaves the passes and the saved design as they were."""
     tool, start = "update_wallet_pass_batch", time.monotonic()
     caller = caller.with_payment_argument(x402_payment)
     found = pilot.authenticate(batch_key.split(".")[0], batch_key) if isinstance(batch_key, str) else None
@@ -1630,7 +1662,9 @@ async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x4
     except ValueError as e:
         raise PassRejected(str(e), 400) from None
     async with _pilot_lock(p["id"]):
-        targets = pilot.issued_rows(p["id"])
+        if pilot.expires_epoch(p) <= time.time():
+            raise PassRejected("this batch's event has ended; its passes can no longer be updated", 400)
+        targets = pilot.issued_rows(p["id"], live=True)
         if not targets:
             raise PassRejected("this batch has no live passes to update", 400)
         merged = pilot.merge_changes(p["design_obj"], changes)
@@ -1653,57 +1687,44 @@ async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x4
             raise PassRejected(f"that change would not build: {e}; nothing was charged", 400) from None
         verified = await anyio.to_thread.run_sync(lambda: _gate(
             caller, len(targets), free_tier=False, tool=tool, path=path, action="update", style=style, org=org))
-        try:  # a sample is signed (images, size) once paid for, and before anything is charged
-            await anyio.to_thread.run_sync(lambda: _build_pkpass(pilot.fill(merged, targets[0]), str(uuid.uuid4()),
-                                                                 None), limiter=BUILD_LIMITER)
-        except pass_builder.PassBuildError as e:
-            _log_failure(e, caller, "update", style, org, None, start)
-            raise PassRejected(f"that change would not build: {e}; nothing was charged", 400) from None
+        stage, swapped = f"{p['id']}.{secrets.token_hex(8)}", False
         try:
-            receipt = await anyio.to_thread.run_sync(lambda: _settle(verified, lambda: None))
-        except payments.PaymentError as e:
-            raise _payment_required(caller, tool, path, str(e), len(targets), free_tier=False) from None
-        pilot.save_design(p["id"], merged)
-        p["design_obj"] = merged
-        done, failed = [], 0
-        sem = anyio.Semaphore(BATCH_BUILDS_AT_ONCE)
-
-        async def work(row):
-            nonlocal failed
-            async with sem:
-                try:
-                    if await anyio.to_thread.run_sync(lambda: _rebuild_batch_pass(p, row), limiter=BUILD_LIMITER):
-                        done.append(row["serial"])
-                except Exception:
-                    failed += 1
-                    logger.error("batch update rebuild failed: %s", traceback.format_exc())
-
-        async with anyio.create_task_group() as tg:
-            for row in targets:
-                tg.start_soon(work, row)
-        tokens = await anyio.to_thread.run_sync(pilot.all_push_tokens, done)
-        notified, dead = await anyio.to_thread.run_sync(apns.push, tokens)
-        pilot.drop_dead_tokens(dead)
+            done, errors = await rebuild_all({**p, "design_obj": merged}, targets, caller.ip, logged=False,
+                                             at_once=BATCH_BUILDS_AT_ONCE, stage=stage)
+            if errors or len(done) != len(targets):
+                e = errors[0] if errors else RuntimeError("a pass in this batch is no longer stored")
+                built = isinstance(e, pass_builder.PassBuildError)
+                _log_failure(e, caller, "update", style, org, None, start)
+                raise PassRejected(f"that change would not build: {e}; nothing was charged" if built
+                                   else "internal error rebuilding the passes; nothing was charged",
+                                   400 if built else 500)
+            try:
+                receipt = await anyio.to_thread.run_sync(lambda: _settle(verified, lambda: db.discard_stage(stage)))
+            except payments.PaymentError as e:
+                _log(caller, style=style, organization_name=org, success=False, error="payment settlement failed",
+                     duration_ms=int((time.monotonic() - start) * 1000), serial_number=None, action="update")
+                raise _payment_required(caller, tool, path, str(e), len(targets), free_tier=False) from None
+            try:
+                replaced = await anyio.to_thread.run_sync(lambda: db.swap_stage(
+                    stage, "UPDATE pilots SET design = ? WHERE id = ?", (json.dumps(merged), p["id"])))
+            except Exception:
+                logger.error("batch %s update was charged (%s) but its new versions could not be swapped in: %s",
+                             p["id"], receipt.get("transaction"), traceback.format_exc())
+                raise
+            swapped = True
+            if replaced != len(done):
+                logger.error("batch %s update: %d passes staged, %d swapped in", p["id"], len(done), replaced)
+        finally:
+            if not swapped:
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(lambda: db.discard_stage(stage))
+        notified = await push_updates(done)
     ms = int((time.monotonic() - start) * 1000) // max(len(targets), 1)
     for row in targets:
-        ok = row["serial"] in done
-        _log(caller, style=style, organization_name=org, success=ok, error=None if ok else "rebuild failed after payment",
-             duration_ms=ms, serial_number=row["serial"], action="update", payment_tx=receipt.get("transaction"))
-    result = {"batch_id": p["id"], "updated": len(done), "notified_devices": notified,
-              "charged": payments.price_for(len(targets)), "payment": receipt}
-    if failed:
-        result["failed"] = failed
-    return result
-
-
-def _rebuild_batch_pass(p: dict, row: dict) -> bool:
-    stored = db.get_pass(row["serial"])
-    if stored is None:
-        return False
-    params = pilot.fill(p["design_obj"], row)
-    pkpass = _build_pkpass(params, row["serial"], stored["auth_token"])
-    db.replace_pass(row["serial"], json.dumps(params), pkpass, max(int(time.time()), stored["updated"] + 1))
-    return True
+        _log(caller, style=style, organization_name=org, success=True, error=None, duration_ms=ms,
+             serial_number=row["serial"], action="update", payment_tx=receipt.get("transaction"))
+    return {"batch_id": p["id"], "updated": len(done), "notified_devices": notified,
+            "charged": payments.price_for(len(targets)), "payment": receipt}
 
 
 _BATCH_TOOL_ANNOTATIONS = dict(read_only_hint=False, idempotent_hint=False, open_world_hint=False)
