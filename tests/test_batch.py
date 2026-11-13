@@ -274,6 +274,8 @@ try:
     check("a batch over the paid daily cap -> 429 with what's left", r.status_code == 429 and "this call needs 31" in r.text, r.text)
 
     # --- single-pass paths unchanged ---
+    r = httpx.post(f"{base}/api/passes", json={"style": "generic", "organization_name": "S", "description": "d", **CALLER})
+    check("paid batch passes don't use up the same caller's free passes (#3)", r.status_code == 200, r.text)
     r = httpx.post(f"{base}/api/passes", json={"style": "generic", "organization_name": "S", "description": "d",
                                                 "contact_email": "solo@realevent.dev", "x402_ready": False},
                    headers={"x-real-ip": "10.9.9.9"})
