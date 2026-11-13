@@ -15,11 +15,8 @@ shared signing service, not a per-caller cert. Free up to the per-IP daily
 limit; past it, a caller can pay per call with x402 (payments.py) instead of
 being refused, without any change to the tool interface.
 """
-import base64
 import contextlib
 import csv
-import datetime
-import hashlib
 import inspect
 import io
 import json
@@ -46,11 +43,10 @@ import anyio
 import apns
 import csv_clean
 import db
-import image_fetch
-import image_gen
 import pass_builder
 import payments
 import pilot
+import pkpass
 import site_stats
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -67,14 +63,14 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 DASHBOARD_HTML = (BASE_DIR / "dashboard.html").read_text()
 
 DOWNLOAD_TTL_SECONDS = 60 * 60  # 1 hour, matches fileshare.py's convention
-# Capacity guards, so no caller (paying or not) can take the box down. A pass is ~16 KB without
-# images; each image URL can be 25 megapixels, so builds are memory-heavy and run at most 4 at once
+# Capacity guards, so no caller (paying or not) can take the box down. Builds are memory-heavy (each
+# image URL can be 25 megapixels; pkpass.MAX_PKPASS_BYTES caps the result) and run at most 4 at once
 # (the rest queue). systemd's MemoryMax/CPUQuota are the backstop.
-MAX_PKPASS_BYTES = int(os.environ.get("WALLET_MCP_MAX_PASS_KB", 10 * 1024)) * 1024
 MIN_FREE_DISK_BYTES = int(os.environ.get("WALLET_MCP_MIN_FREE_DISK_GB", 5)) * 1024 ** 3
+CAPACITY_ERROR = "the service is temporarily out of capacity, try again later"
 BUILD_LIMITER = anyio.CapacityLimiter(4)
 MAX_UPDATABLE_HOURS = 30 * 24  # updatable passes are stored for 1 hour by default, at most 30 days
-DEFAULT_ICON_COLOR = "#c98500"  # site accent color
+DEFAULT_ICON_COLOR = pkpass.DEFAULT_ICON_COLOR
 
 db.init()
 pilot.init()
@@ -229,7 +225,7 @@ def _log(caller: Caller, **fields) -> None:
                    contact_email=caller.contact_email, x402_ready=caller.x402_ready, **fields)
 
 
-PUBLIC_BASE_URL = os.environ.get("WALLET_MCP_PUBLIC_URL", "https://vps.arshw.com/wallet-mcp")
+PUBLIC_BASE_URL = pkpass.PUBLIC_BASE_URL
 
 
 @server.tool(
@@ -606,9 +602,9 @@ def _create_pass(caller: Caller, request: dict) -> dict:
             raise pass_builder.PassBuildError(
                 f"serial_number {serial!r} is already used by another updatable pass; omit it to get a fresh one"
             )
-        params = _resolve_image_urls(params)
+        params = pkpass.resolve_image_urls(params)
         auth_token = secrets.token_urlsafe(24) if updatable else None
-        pkpass_bytes = _build_pkpass(params, serial, auth_token)
+        pkpass_bytes = pkpass.build(params, serial, auth_token)
         # Everything that can fail is written first and settled last, so a caller is never charged
         # for a pass they don't get; a failed settlement undoes the writes.
         token = _register_download(pkpass_bytes)
@@ -621,10 +617,10 @@ def _create_pass(caller: Caller, request: dict) -> dict:
         if updatable:
             edit_token = secrets.token_urlsafe(24)
             expires = int(time.time()) + updatable_hours * 3600
-            db.store_pass(serial, auth_token, _hash_token(edit_token), json.dumps(params), pkpass_bytes,
+            db.store_pass(serial, auth_token, db.hash_token(edit_token), json.dumps(params), pkpass_bytes,
                           int(time.time()), expires)
             result["edit_token"] = edit_token
-            result["updatable_until"] = _iso(expires)
+            result["updatable_until"] = db.iso(expires)
         def undo():
             _unregister_download(token)
             if updatable:
@@ -686,7 +682,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     """Merge `changes` into a stored updatable pass, re-sign it, and push it to installed devices."""
     start = time.monotonic()
     row = db.get_pass(serial_number)
-    if row is None or not secrets.compare_digest(row["edit_hash"], _hash_token(edit_token)):
+    if row is None or not secrets.compare_digest(row["edit_hash"], db.hash_token(edit_token)):
         # One message for both cases, so serials can't be probed without their token.
         raise PassRejected(
             "unknown serial_number, wrong edit_token, or the pass's update window (updatable_hours) has ended", 404)
@@ -702,8 +698,8 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     paid = _gate(caller, 1, free_tier=True, tool="update_wallet_pass", path="/api/passes", action="update",
                  style=style, org=organization_name)
     try:
-        params.update(_resolve_image_urls(changes))
-        pkpass_bytes = _build_pkpass(params, serial_number, row["auth_token"])
+        params.update(pkpass.resolve_image_urls(changes))
+        pkpass_bytes = pkpass.build(params, serial_number, row["auth_token"])
         token = _register_download(pkpass_bytes)
         # Wallet compares these as tags, so each version must sort after the last.
         updated = max(int(time.time()), row["updated"] + 1)
@@ -730,20 +726,12 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         "serial_number": serial_number,
         "pass_type_identifier": pass_builder.PASS_TYPE_IDENTIFIER,
         "notified_devices": notified,
-        "updatable_until": _iso(row["expires"]),
+        "updatable_until": db.iso(row["expires"]),
     }
     if receipt:
         result["payment"] = receipt
     _add_x402_setup_hint(result, caller, paid=bool(receipt))
     return result
-
-
-def _iso(epoch: int) -> str:
-    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(timespec="seconds")
-
-
-def _hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
 
 
 # --- The payment gate, shared by single passes and batches. Order: capacity, the failure limit, the free
@@ -763,7 +751,7 @@ def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, 
     if not _pilot_disk_ok():
         logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
         _refuse(caller, action, style, org, "server is low on disk space",
-                PassRejected("the service is temporarily out of capacity, try again later", 503))
+                PassRejected(CAPACITY_ERROR, 503))
     fail = db.check_fail_limit(caller.ip, caller.contact_email)
     if fail:
         _refuse(caller, action, style, org, fail, 429)
@@ -857,86 +845,8 @@ def _rejection(e: Exception, caller: Caller, action: str) -> Exception:
     return PassRejected(str(e), 400) if isinstance(e, pass_builder.PassBuildError) else e
 
 
-_IMAGE_PARAMS = [name for name in inspect.signature(create_wallet_pass).parameters if name.endswith("_png_b64")]
-
-
-def _resolve_image_urls(params: dict) -> dict:
-    """Replace any https:// image URL with the fetched image as base64 PNG, so a stored
-    updatable pass never needs to re-fetch a URL that may since have changed or gone."""
-    out = dict(params)
-    for name in _IMAGE_PARAMS:
-        value = out.get(name)
-        if isinstance(value, str) and value.strip().lower().startswith(("https://", "http://")):
-            out[name] = base64.b64encode(image_fetch.fetch_png(value.strip(), name)).decode()
-    return out
-
-
-def _build_pkpass(params: dict, serial: str, auth_token: str | None) -> bytes:
-    """Build and sign a pass from create_wallet_pass parameters. auth_token makes it updatable."""
-    p = params
-    icon_color = p.get("icon_color") or DEFAULT_ICON_COLOR
-    style, organization_name = p["style"], p["organization_name"]
-    logo_text, background_color = p.get("logo_text"), p.get("background_color")
-    poster, semantic_layout = p.get("poster", False), p.get("semantic_layout", False)
-    generate_logo = p.get("generate_logo", True)
-    pass_dict = pass_builder.build_pass_json(
-        **{k: p.get(k) for k in _PASS_JSON_PARAMS if k in p},
-        serial_number=serial,
-        web_service_url=f"{PUBLIC_BASE_URL}/passkit" if auth_token else None,
-        authentication_token=auth_token,
-    )
-
-    files: dict[str, bytes] = {}
-    if p.get("icon_png_b64"):
-        files["icon.png"] = image_gen.decode_b64_png(p["icon_png_b64"], "icon_png_b64")
-    else:
-        files.update(image_gen.icon_set(icon_color, p.get("icon_text") or organization_name))
-    if p.get("logo_png_b64"):
-        files["logo.png"] = image_gen.decode_b64_png(p["logo_png_b64"], "logo_png_b64")
-    elif generate_logo:
-        files.update(image_gen.logo_set(p.get("logo_color") or icon_color, logo_text or organization_name))
-    background_png_b64 = p.get("background_png_b64")
-    if poster:
-        if background_png_b64:
-            files["background.png"] = image_gen.decode_b64_png(background_png_b64, "background_png_b64")
-        else:
-            files.update(image_gen.background_set(background_color or icon_color))
-    elif background_png_b64 and style == "eventTicket":
-        files["background.png"] = image_gen.decode_b64_png(background_png_b64, "background_png_b64")
-    if semantic_layout and style == "eventTicket":
-        if p.get("artwork_png_b64"):
-            files["artwork.png"] = image_gen.decode_b64_png(p["artwork_png_b64"], "artwork_png_b64")
-        elif not background_png_b64:  # Wallet needs one of the two
-            files.update(image_gen.artwork_set(background_color or icon_color))
-    if p.get("primary_logo_png_b64"):
-        files["primaryLogo.png"] = image_gen.decode_b64_png(p["primary_logo_png_b64"], "primary_logo_png_b64")
-    elif (poster or semantic_layout) and generate_logo:
-        files.update(image_gen.primary_logo_set(p.get("foreground_color") or "#ffffff", logo_text or organization_name))
-    for name, param in (("secondaryLogo", "secondary_logo_png_b64"), ("strip", "strip_png_b64"),
-                        ("thumbnail", "thumbnail_png_b64")):
-        if p.get(param):
-            files[f"{name}.png"] = image_gen.decode_b64_png(p[param], param)
-
-    pkpass = pass_builder.build_pkpass(pass_dict, files)
-    if len(pkpass) > MAX_PKPASS_BYTES:
-        raise pass_builder.PassBuildError(
-            f"the pass is {len(pkpass) / 1024 ** 2:.2f} MB; the limit is {MAX_PKPASS_BYTES / 1024 ** 2:g} MB. "
-            "Use smaller images: Wallet shows them at most a few hundred pixels wide")
-    return pkpass
-
-
-_PASS_JSON_PARAMS = [
-    name for name in inspect.signature(pass_builder.build_pass_json).parameters
-    if name not in ("serial_number", "web_service_url", "authentication_token")
-]
-
-
-def _check_pass_json(params: dict, serial: str = "check", auth_token: str | None = None) -> None:
-    """Raises PassBuildError if params' pass.json doesn't build. Cheap: no images are fetched or decoded
-    and nothing is signed, so it can run before a call is paid for."""
-    pass_builder.build_pass_json(**{k: params.get(k) for k in _PASS_JSON_PARAMS if k in params},
-                                 serial_number=serial, web_service_url="https://x" if auth_token else None,
-                                 authentication_token=auth_token)
+# pkpass.py builds passes; its image list must stay the tool's image parameters.
+assert pkpass.IMAGE_PARAMS == [n for n in inspect.signature(create_wallet_pass).parameters if n.endswith("_png_b64")]
 
 
 def _tool_fields(tool, exclude=(), **defaults) -> dict:
@@ -1009,8 +919,6 @@ async def api_requests(request: Request) -> Response:
 
 @server.custom_route("/api/requests.csv", methods=["GET"])
 async def api_requests_csv(request: Request) -> Response:
-    import csv
-    import io
     rows = (await anyio.to_thread.run_sync(lambda: db.request_log(limit=0, **_log_filters(request))))["rows"]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=db.LOG_COLUMNS)
@@ -1209,15 +1117,27 @@ async def download(request: Request) -> Response:
 PILOT_BODY_LIMIT = 3 * 1024 * 1024
 PILOT_CSV_LIMIT = 2 * 1024 * 1024
 CLEAN_LIMITER = anyio.CapacityLimiter(2)  # a clean may wait on a model call for up to a minute
-_pilot_locks: dict = {}
+_pilot_locks: dict = {}  # pilot id -> [lock, tasks holding or waiting for it]; dropped once that is 0
 
 
 def _pilot_error(message: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 
-def _pilot_lock(pilot_id: str):
-    return _pilot_locks.setdefault(pilot_id, anyio.Lock())
+@contextlib.asynccontextmanager
+async def _pilot_lock(pilot_id: str):
+    """One pilot/batch's issue and update calls run one at a time. The entry is counted before waiting
+    and dropped by the last user, all on the event loop thread, so every concurrent caller for an id
+    shares one lock and the dict holds only ids in use."""
+    entry = _pilot_locks.setdefault(pilot_id, [anyio.Lock(), 0])
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0:
+            del _pilot_locks[pilot_id]
 
 
 async def _pilot_body(request: Request):
@@ -1248,6 +1168,14 @@ def _pilot_for(request: Request, key, allow_batch: bool = False):
 
 def _pilot_disk_ok() -> bool:
     return shutil.disk_usage(DOWNLOAD_DIR).free >= MIN_FREE_DISK_BYTES
+
+
+class LowDisk(Exception):
+    """issue_rows stopped issuing because the disk filled up while it ran."""
+
+    def __init__(self):
+        super().__init__("server is low on disk space")
+
 
 
 def _pilot_preview_path(pilot_id: str) -> Path:
@@ -1341,12 +1269,16 @@ def _at_most(at_once: int | None):
 
 async def issue_rows(p: dict, unique: dict, ip: str, *, logged: bool = True, at_once: int | None = None) -> dict:
     """Issue (or find) the pass for every unique row, concurrently: ticket -> pilot.issue_one's result, or the
-    exception it raised. Nothing is rolled back here: a caller that wants all-or-nothing unissues."""
+    exception it raised (LowDisk for rows not tried because the disk is full). Nothing is rolled back here: a
+    caller that wants all-or-nothing unissues."""
     results: dict = {}
     limit = _at_most(at_once)
 
     async def work(ticket, row):
         async with limit:
+            if not _pilot_disk_ok():  # checked per pass: a big issue can fill the disk while it runs
+                results[ticket] = LowDisk()
+                return
             try:
                 results[ticket] = await anyio.to_thread.run_sync(
                     lambda: pilot.issue_one(p, row, ip, logged), limiter=BUILD_LIMITER)
@@ -1419,7 +1351,7 @@ async def api_pilot_issue(request: Request) -> Response:
     if pilot.expires_epoch(p) <= time.time():
         return _pilot_error("this event has ended; no more passes can be issued")
     if not _pilot_disk_ok():
-        return _pilot_error("the service is temporarily out of capacity, try again later", 503)
+        return _pilot_error(CAPACITY_ERROR, 503)
     ip = _client_ip(request)
     unique = _unique_rows(rows)
     async with _pilot_lock(p["id"]):
@@ -1430,6 +1362,10 @@ async def api_pilot_issue(request: Request) -> Response:
             return _pilot_error(f"this pilot is limited to {p['max_passes']} passes; {total} are issued and this "
                                 f"request would add {len(fresh)} more")
         results = await issue_rows(p, unique, ip)
+        if any(isinstance(r, LowDisk) for r in results.values()):
+            logger.error("pilot %s: stopped issuing, less than %d GB of disk free", p["id"],
+                         MIN_FREE_DISK_BYTES // 1024 ** 3)
+            return _pilot_error(CAPACITY_ERROR, 503)
         for ticket, r in results.items():
             if isinstance(r, Exception):
                 who = unique[ticket]["name"]
@@ -1476,13 +1412,13 @@ async def api_pilot_update(request: Request) -> Response:
     except ValueError as e:
         return _pilot_error(str(e))
     if not _pilot_disk_ok():
-        return _pilot_error("the service is temporarily out of capacity, try again later", 503)
+        return _pilot_error(CAPACITY_ERROR, 503)
     ip = _client_ip(request)
     async with _pilot_lock(p["id"]):
         merged = pilot.merge_changes(p["design_obj"], changes)
         try:  # prove the new design builds before touching any stored pass
             await anyio.to_thread.run_sync(
-                lambda: _build_pkpass(pilot.fill(merged, pilot.SAMPLE_ROW), str(uuid.uuid4()), None),
+                lambda: pkpass.build(pilot.fill(merged, pilot.SAMPLE_ROW), str(uuid.uuid4()), None),
                 limiter=BUILD_LIMITER)
         except pass_builder.PassBuildError as e:
             return _pilot_error(f"that change would not build: {e}")
@@ -1576,7 +1512,7 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
         try:
             sample = pilot.fill(pilot.ensure_field_keys(pilot.normalize_design(design, org, design["description"])),
                                 rows[0])
-            _check_pass_json(sample)
+            pkpass.validate_pass_json(sample)
         except pass_builder.PassBuildError as e:
             _log_failure(e, caller, "create", style, org, None, start)
             raise PassRejected(f"the design doesn't build: {e}", 400) from None
@@ -1611,6 +1547,11 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
             failed = [(t, r) for t, r in results.items() if isinstance(r, Exception)]
             if failed:
                 pilot.unissue(p["id"], new_serials)
+                if any(isinstance(e, LowDisk) for _, e in failed):
+                    logger.error("batch %s: stopped issuing, less than %d GB of disk free", p["id"],
+                                 MIN_FREE_DISK_BYTES // 1024 ** 3)
+                    _refuse(caller, "create", style, org, "server is low on disk space",
+                            PassRejected(f"{CAPACITY_ERROR}; nothing was charged", 503))
                 ticket, e = failed[0]
                 built = isinstance(e, pass_builder.PassBuildError)
                 _log_failure(e, caller, "create", style, org, None, start)
@@ -1636,7 +1577,7 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
               "reused": len(passes) - len(new_serials), "issued_total": pilot.issued_count(p["id"]),
               "charged": payments.price_for(len(new_serials)) if receipt else "$0",
               "links_csv_url": _batch_links_csv(p, key),
-              "updatable_until": _iso(pilot.expires_epoch(p))}
+              "updatable_until": db.iso(pilot.expires_epoch(p))}
     if new_batch:
         result = {"batch_key": key, **result}
     if receipt:
@@ -1676,7 +1617,7 @@ async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x4
             values can fail. Cheap (nothing is signed), so it runs before the payment gate."""
             for row in targets:
                 try:
-                    _check_pass_json(pilot.fill(merged, row), row["serial"], row["auth_token"])
+                    pkpass.validate_pass_json(pilot.fill(merged, row), row["serial"], row["auth_token"])
                 except pass_builder.PassBuildError as e:
                     raise pass_builder.PassBuildError(f"{row['name']} ({row['ticket']}): {e}") from None
 
@@ -1917,14 +1858,11 @@ async def api_get_batch(request: Request) -> Response:
     passes = [{"name": r["name"], "ticket": r["ticket"], "type": r["type"], "email": r["email"],
                "link": pilot.pass_link(r["serial"], r["auth_token"])} for r in pilot.issued_rows(p["id"])]
     return JSONResponse({"batch_id": p["id"], "organization_name": p["org"], "description": p["event_name"],
-                         "event_end": p["event_end"], "updatable_until": _iso(pilot.expires_epoch(p)),
+                         "event_end": p["event_end"], "updatable_until": db.iso(pilot.expires_epoch(p)),
                          "issued_total": len(passes), "max_passes": p["max_passes"], "design": p["design_obj"],
                          "passes": passes, "links_csv_url": _batch_links_csv(p, key)},
                         headers={"Cache-Control": "no-store"})
 
-
-
-pilot.configure(_build_pkpass, _resolve_image_urls, PUBLIC_BASE_URL)
 
 
 if __name__ == "__main__":
