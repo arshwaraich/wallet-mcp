@@ -136,6 +136,22 @@ try:
           r.status_code == 402 and pr["accepts"][0]["amount"] == "30000" and "3 new passes" in pr["error"], r.text)
     with sqlite3.connect(db_path) as c:
         check("refused quote leaves no batch behind", c.execute("SELECT COUNT(*) FROM pilots").fetchone()[0] == 0)
+
+    # --- #4: before the 402 only cheap checks; images are fetched (and a batch stored) only once paid ---
+    img = {"design": {**DESIGN, "logo_png_b64": "https://unreachable.invalid/logo.png"}, "event_end": END,
+           "rows": ROWS, **CALLER}
+    r = httpx.post(f"{base}/api/batches", json=img, timeout=30)
+    with sqlite3.connect(db_path) as c:
+        n_pilots = c.execute("SELECT COUNT(*) FROM pilots").fetchone()[0]
+    check("unpaid new batch with an unreachable image URL -> 402 (no fetch), no pilots row",
+          r.status_code == 402 and "3 new passes" in r.json()["error"] and n_pilots == 0, (r.text, n_pilots))
+    settles = sum(1 for p_, _ in seen if p_.endswith("/settle"))
+    r = httpx.post(f"{base}/api/batches", json=img, headers=hdr(sign(r.json())), timeout=30)
+    with sqlite3.connect(db_path) as c:
+        n_pilots = c.execute("SELECT COUNT(*) FROM pilots").fetchone()[0]
+    check("paid, the image fetch fails -> 400, nothing settled, no pilots row",
+          r.status_code == 400 and "nothing was charged" in r.json()["error"] and n_pilots == 0
+          and sum(1 for p_, _ in seen if p_.endswith("/settle")) == settles, (r.text, n_pilots))
     r = httpx.post(f"{base}/api/batches", json=body, headers=hdr(sign(pr)), timeout=60)
     res = r.json()
     check("paid batch -> 200 with key, 4 rows, 3 created, charged $0.03",

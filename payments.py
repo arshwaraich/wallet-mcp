@@ -31,6 +31,9 @@ enabled = bool(PAY_TO)
 MCP_RESPONSE_META_KEY = "x402/payment-response"  # where a paid tool result carries its receipt
 
 
+UNAVAILABLE = "payments are unavailable right now; try again later"  # the facilitator can't be reached
+
+
 class PaymentError(Exception):
     """The payment was missing, invalid, or didn't settle; the caller can retry with a new one."""
 
@@ -108,7 +111,7 @@ def verify(raw, count: int = 1):
         server, requirements = _resource_server(count)
     except Exception as e:
         logger.error("x402 facilitator setup failed: %r", e)
-        raise PaymentError("payments are unavailable right now; try again later") from None
+        raise PaymentError(UNAVAILABLE) from None
     matched = server.find_matching_requirements(requirements, payload)
     if matched is None:
         raise PaymentError(f"the payment doesn't match the price: {price_for(count)} in USDC on {NETWORK} to {PAY_TO}")

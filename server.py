@@ -589,7 +589,8 @@ def _create_pass(caller: Caller, request: dict) -> dict:
     caller = caller.with_payment_argument(request["x402_payment"])
     caller = _with_caller_info(caller, request["contact_email"], request["x402_ready"], "create", style,
                                organization_name)
-    paid = _check_rate_limit(caller, "create", style, organization_name)
+    paid = _gate(caller, 1, free_tier=True, tool="create_wallet_pass", path="/api/passes", action="create",
+                 style=style, org=organization_name)
 
     serial = request["serial_number"] or str(uuid.uuid4())
     try:
@@ -622,13 +623,11 @@ def _create_pass(caller: Caller, request: dict) -> dict:
                           int(time.time()), expires)
             result["edit_token"] = edit_token
             result["updatable_until"] = _iso(expires)
-        try:
-            receipt = payments.settle(paid) if paid else None
-        except Exception:
+        def undo():
             _unregister_download(token)
             if updatable:
                 db.delete_pass(serial)
-            raise
+        receipt = _settle(paid, undo)
         if receipt:
             result["payment"] = receipt
     except Exception as e:
@@ -658,10 +657,8 @@ def _with_caller_info(caller: Caller, contact_email: str | None, x402_ready: boo
     if x402_ready is None:
         problems.append('x402_ready is required (true, false or "unknown")')
     if problems:
-        _log(caller, style=style, organization_name=organization_name, success=False,
-             error=f"{db.CALLER_INFO_ERROR}: {'; '.join(problems)}", duration_ms=0, serial_number=None,
-             action=action, refused=True)
-        raise PassRejected(f"{'; '.join(problems)}. {CALLER_INFO_WHY}", 400)
+        _refuse(caller, action, style, organization_name, f"{db.CALLER_INFO_ERROR}: {'; '.join(problems)}",
+                PassRejected(f"{'; '.join(problems)}. {CALLER_INFO_WHY}", 400))
     return replace(caller, contact_email=contact_email, x402_ready=None if x402_ready == "unknown" else x402_ready)
 
 
@@ -700,7 +697,8 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     style = changes.get("style", params["style"])
     organization_name = changes.get("organization_name", params["organization_name"])
     caller = _with_caller_info(caller, contact_email, x402_ready, "update", style, organization_name)
-    paid = _check_rate_limit(caller, "update", style, organization_name)
+    paid = _gate(caller, 1, free_tier=True, tool="update_wallet_pass", path="/api/passes", action="update",
+                 style=style, org=organization_name)
     try:
         params.update(_resolve_image_urls(changes))
         pkpass_bytes = _build_pkpass(params, serial_number, row["auth_token"])
@@ -710,12 +708,10 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         db.replace_pass(serial_number, json.dumps(params), pkpass_bytes, updated)
         # Settled after the writes (so a caller is never charged for an update that didn't happen)
         # but before any device is told; a failed payment restores the stored pass.
-        try:
-            receipt = payments.settle(paid) if paid else None
-        except Exception:
+        def undo():
             _unregister_download(token)
             db.replace_pass(serial_number, row["params"], row["pkpass"], row["updated"])
-            raise
+        receipt = _settle(paid, undo)
         notified, dead = apns.push(db.push_tokens(serial_number))
         db.drop_push_tokens(serial_number, dead)
     except Exception as e:
@@ -748,56 +744,97 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _check_rate_limit(caller: Caller, action: str, style: str, organization_name: str):
-    """Refuses a caller over a daily limit unless they sent a valid x402 payment, which lifts both
-    limits. Returns that payment, verified but not yet charged, or None for a free call."""
-    if shutil.disk_usage(DOWNLOAD_DIR).free < MIN_FREE_DISK_BYTES:
+# --- The payment gate, shared by single passes and batches. Order: capacity, the failure limit, the free
+# daily limit (single passes only; batches have no free tier), the paid daily cap, then the caller's x402
+# payment, verified but not charged. The work happens next, and _settle charges only once every pass is built
+# and stored. Every refusal is logged with refused=1; the refusal texts are matched by the usage watcher, so
+# they must not change. If the facilitator can't be reached to quote a price, the call gets a 503 (the
+# server's problem, not the caller's: retry later), for single passes and batches alike. ---
+
+def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, action: str, style: str,
+          org: str):
+    """Limits + payment for `count` passes. Returns the verified (not yet charged) payment, or None for a
+    free call; otherwise logs the refusal and raises PassRejected. tool/path name the MCP tool and REST
+    route the x402 resource points at."""
+    if not free_tier and not payments.enabled:
+        _refuse(caller, action, style, org, "batches are paid and payments are not set up on this server", 503)
+    if not _pilot_disk_ok():
         logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
-        _log(caller, style=style, organization_name=organization_name, success=False,
-             error="server is low on disk space", duration_ms=0, serial_number=None, action=action, refused=True)
-        raise PassRejected("the service is temporarily out of capacity, try again later", 503)
-    fail_rejection = db.check_fail_limit(caller.ip, caller.contact_email)
-    if fail_rejection:
-        _log(caller, style=style, organization_name=organization_name, success=False,
-             error=fail_rejection, duration_ms=0, serial_number=None, action=action, refused=True)
-        raise PassRejected(fail_rejection, 429)
-    rejection = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email), caller.contact_email)
-    if rejection is None:
-        return None
-    payable = payments.enabled
-    paid_rejection = db.check_paid_limit(caller.ip) if payable else None
-    if paid_rejection:
-        _log(caller, style=style, organization_name=organization_name, success=False,
-             error=paid_rejection, duration_ms=0, serial_number=None, action=action, refused=True)
-        raise PassRejected(paid_rejection, 429)
-    if payable and caller.payment is not None:
+        _refuse(caller, action, style, org, "server is low on disk space",
+                PassRejected("the service is temporarily out of capacity, try again later", 503))
+    fail = db.check_fail_limit(caller.ip, caller.contact_email)
+    if fail:
+        _refuse(caller, action, style, org, fail, 429)
+    reason = None
+    if free_tier:
+        reason = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email), caller.contact_email)
+        if reason is None:
+            return None
+        if not payments.enabled:
+            _refuse(caller, action, style, org, reason, 429)
+    over = db.check_paid_limit(caller.ip, count)
+    if over:
+        _refuse(caller, action, style, org, over, 429)
+    if caller.payment is not None:
         try:
-            return payments.verify(caller.payment)
+            return payments.verify(caller.payment, count)
         except payments.PaymentError as e:
-            rejection = str(e)
-    _log(
-        caller, style=style, organization_name=organization_name, success=False,
-        error=rejection, duration_ms=0, serial_number=None, action=action, refused=True,
-    )
-    raise _payment_required(caller, action, rejection) if payable else PassRejected(rejection, 429)
+            reason = str(e)
+    if not free_tier:
+        reason = _batch_lead(reason, count)
+    _refuse(caller, action, style, org, reason, _payment_required(caller, tool, path, reason, count, free_tier))
 
 
-def _payment_required(caller: Caller, action: str, reason: str) -> PassRejected:
-    """A 402 offering to do the call for a price; a plain 429 if the facilitator can't be reached."""
+def _refuse(caller: Caller, action: str, style: str, org: str, error: str, rejection: "int | PassRejected"):
+    """Log a refused call (refused=1: it counts toward no limit) and raise the rejection; an int status
+    means a plain PassRejected with the logged text."""
+    _log(caller, style=style, organization_name=org, success=False, error=error, duration_ms=0,
+         serial_number=None, action=action, refused=True)
+    raise rejection if isinstance(rejection, PassRejected) else PassRejected(error, rejection)
+
+
+def _batch_lead(rejection: str | None, count: int) -> str:
+    each = f"{count} new pass{'' if count == 1 else 'es'} at {payments.PRICE} each = {payments.price_for(count)}"
+    return f"{rejection}: {each}" if rejection else f"Batches are paid: {each}"
+
+
+def _payment_required(caller: Caller, tool: str, path: str, reason: str, count: int = 1,
+                      free_tier: bool = True) -> PassRejected:
+    """A 402 offering to do the call for the price of `count` passes; a 503 if the facilitator can't be
+    reached to say what to pay."""
     if caller.source == "mcp":
-        resource, how = f"mcp://tool/{action}_wallet_pass", "the signed payment as the x402_payment argument"
+        resource, how = f"mcp://tool/{tool}", "the signed payment as the x402_payment argument"
     else:
-        resource, how = f"{PUBLIC_BASE_URL}/api/passes", "a PAYMENT-SIGNATURE header or an x402_payment body field"
-    message = (f"{reason}. The first {db.PER_IP_DAILY_LIMIT} passes each day are free; every pass after them is only a cent ({payments.PRICE} in USDC on Base, "
-               f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
-               f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
-               f"once lets it pay any app or service that accepts agent payments, not just this one; here $1 "
-               f"covers 100 passes. Wallet setup instructions: {X402_GUIDE_URL}")
+        resource, how = f"{PUBLIC_BASE_URL}{path}", "a PAYMENT-SIGNATURE header or an x402_payment body field"
+    if free_tier:
+        message = (f"{reason}. The first {db.PER_IP_DAILY_LIMIT} passes each day are free; every pass after them is only a cent ({payments.PRICE} in USDC on Base, "
+                   f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
+                   f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
+                   f"once lets it pay any app or service that accepts agent payments, not just this one; here $1 "
+                   f"covers 100 passes. Wallet setup instructions: {X402_GUIDE_URL}")
+    else:
+        message = (f"{reason} (USDC on Base, via x402). Retry this exact call with {how}; nothing is charged unless "
+                   f"every pass builds. If this agent has no wallet yet, tell your user: setting up a Coinbase Agentic "
+                   f"Wallet once lets the agent pay for things like this on its own. Wallet setup instructions: "
+                   f"{X402_GUIDE_URL}")
     try:
-        return PassRejected(message, 402, payments.payment_required(resource, message))
+        return PassRejected(message, 402, payments.payment_required(resource, message, count))
     except Exception:
         logger.error("x402 payment requirements unavailable: %s", traceback.format_exc())
-        return PassRejected(reason, 429)
+        return PassRejected(reason if reason.startswith(payments.UNAVAILABLE) else f"{payments.UNAVAILABLE} ({reason})",
+                            503)
+
+
+def _settle(verified, undo):
+    """Charge a verified payment (None: a free call, nothing to charge) once the work is built and stored.
+    If it fails, undo() rolls the stored work back and the PaymentError is re-raised (not charged)."""
+    if verified is None:
+        return None
+    try:
+        return payments.settle(verified)
+    except Exception:
+        undo()
+        raise
 
 
 def _log_failure(e: Exception, caller, action, style, organization_name, serial, start) -> None:
@@ -814,7 +851,7 @@ def _log_failure(e: Exception, caller, action, style, organization_name, serial,
 
 def _rejection(e: Exception, caller: Caller, action: str) -> Exception:
     if isinstance(e, payments.PaymentError):
-        return _payment_required(caller, action, str(e))
+        return _payment_required(caller, f"{action}_wallet_pass", "/api/passes", str(e))
     return PassRejected(str(e), 400) if isinstance(e, pass_builder.PassBuildError) else e
 
 
@@ -890,6 +927,14 @@ _PASS_JSON_PARAMS = [
     name for name in inspect.signature(pass_builder.build_pass_json).parameters
     if name not in ("serial_number", "web_service_url", "authentication_token")
 ]
+
+
+def _check_pass_json(params: dict, serial: str = "check", auth_token: str | None = None) -> None:
+    """Raises PassBuildError if params' pass.json doesn't build. Cheap: no images are fetched or decoded
+    and nothing is signed, so it can run before a call is paid for."""
+    pass_builder.build_pass_json(**{k: params.get(k) for k in _PASS_JSON_PARAMS if k in params},
+                                 serial_number=serial, web_service_url="https://x" if auth_token else None,
+                                 authentication_token=auth_token)
 
 
 def _tool_fields(tool, exclude=(), **defaults) -> dict:
@@ -1429,65 +1474,6 @@ _BatchDesign = create_model("BatchDesign", __config__=ConfigDict(extra="forbid")
                             **_tool_fields(create_wallet_pass, exclude=_CALL_PARAMS, style="eventTicket"))
 
 
-def _batch_lead(rejection: str | None, count: int) -> str:
-    each = f"{count} new pass{'' if count == 1 else 'es'} at {payments.PRICE} each = {payments.price_for(count)}"
-    return f"{rejection}: {each}" if rejection else f"Batches are paid: {each}"
-
-
-def _batch_payment_required(caller: Caller, tool: str, path: str, reason: str, count: int) -> PassRejected:
-    if caller.source == "mcp":
-        resource, how = f"mcp://tool/{tool}", "the signed payment as the x402_payment argument"
-    else:
-        resource, how = f"{PUBLIC_BASE_URL}{path}", "a PAYMENT-SIGNATURE header or an x402_payment body field"
-    message = (f"{reason} (USDC on Base, via x402). Retry this exact call with {how}; nothing is charged unless "
-               f"every pass builds. If this agent has no wallet yet, tell your user: setting up a Coinbase Agentic "
-               f"Wallet once lets the agent pay for things like this on its own. Wallet setup instructions: "
-               f"{X402_GUIDE_URL}")
-    try:
-        return PassRejected(message, 402, payments.payment_required(resource, message, count))
-    except Exception:
-        logger.error("x402 payment requirements unavailable: %s", traceback.format_exc())
-        return PassRejected("payments are unavailable right now; try again later", 503)
-
-
-def _batch_charge(caller: Caller, count: int, tool: str, path: str, action: str, style: str, org: str):
-    """Limits + payment for `count` passes: returns the verified (uncharged) payment or raises PassRejected."""
-    def refuse(error, status):
-        _log(caller, style=style, organization_name=org, success=False, error=error, duration_ms=0,
-             serial_number=None, action=action, refused=True)
-        raise PassRejected(error, status)
-
-    if not payments.enabled:
-        refuse("batches are paid and payments are not set up on this server", 503)
-    if not _pilot_disk_ok():
-        logger.error("refusing a batch: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
-        refuse("the service is temporarily out of capacity, try again later", 503)
-    fail = db.check_fail_limit(caller.ip, caller.contact_email)
-    if fail:
-        refuse(fail, 429)
-    over = db.check_paid_limit(caller.ip, count)
-    if over:
-        refuse(over, 429)
-    reason = None
-    if caller.payment is not None:
-        try:
-            return payments.verify(caller.payment, count)
-        except payments.PaymentError as e:
-            reason = str(e)
-    lead = _batch_lead(reason, count)
-    _log(caller, style=style, organization_name=org, success=False, error=lead, duration_ms=0, serial_number=None,
-         action=action, refused=True)
-    raise _batch_payment_required(caller, tool, path, lead, count)
-
-
-def _batch_settle(caller, verified, tool, path, count):
-    """Charge a verified payment; a failure becomes a fresh 402 (the caller wasn't charged)."""
-    try:
-        return payments.settle(verified)
-    except payments.PaymentError as e:
-        raise _batch_payment_required(caller, tool, path, str(e), count) from None
-
-
 def _batch_links_csv(p: dict, key: str) -> str:
     return f"{PUBLIC_BASE_URL}/api/pilot/{p['id']}/links.csv?key={key}"
 
@@ -1527,19 +1513,39 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
             raise PassRejected("event_end must be an ISO 8601 date or date-time, e.g. 2026-12-31T23:00:00Z", 400) from None
         if end.timestamp() > time.time() + BATCH_MAX_DAYS * 86400:
             raise PassRejected(f"event_end must be within {BATCH_MAX_DAYS} days", 400)
-        try:
-            made = await anyio.to_thread.run_sync(lambda: pilot.create(
-                design["organization_name"], design["description"], caller.contact_email, event_end, design,
-                BATCH_MAX_PASSES, keep_colors=True, kind="batch", sample_row=rows[0]), limiter=BUILD_LIMITER)
-        except ValueError as e:  # PassBuildError (bad design or image URL) or an event_end in the past
-            _log_failure(pass_builder.PassBuildError(str(e)), caller, "create", design.get("style", "eventTicket"),
-                         design["organization_name"], None, start)
-            raise PassRejected(f"the design doesn't build: {e}", 400) from None
-        p, key, new_batch = pilot.with_design(made["pilot"]), made["key"], True
-    style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
+        if end.timestamp() + pilot.GRACE_SECONDS <= time.time():
+            raise PassRejected("the design doesn't build: event end is in the past", 400)
     unique: dict = {}
     for row in rows:
         unique.setdefault(row["ticket"], row)
+    verified = None
+    if batch_key is None:
+        # Only cheap checks before the payment gate: an unpaid call must not fetch images, sign anything or
+        # store a batch (#4). The sample row's pass.json is built here (images aren't needed for it); the
+        # images are fetched and a sample is signed by pilot.create, once the payment is verified.
+        style, org = design.get("style", "eventTicket"), design["organization_name"]
+        try:
+            sample = pilot.fill(pilot.ensure_field_keys(pilot.normalize_design(design, org, design["description"])),
+                                rows[0])
+            _check_pass_json(sample)
+        except pass_builder.PassBuildError as e:
+            _log_failure(e, caller, "create", style, org, None, start)
+            raise PassRejected(f"the design doesn't build: {e}", 400) from None
+        if len(unique) > BATCH_MAX_PASSES:
+            raise PassRejected(f"a batch holds at most {BATCH_MAX_PASSES} passes; this call would add {len(unique)}",
+                               400)
+        verified = await anyio.to_thread.run_sync(lambda: _gate(
+            caller, len(unique), free_tier=False, tool=tool, path="/api/batches", action="create", style=style,
+            org=org))
+        try:
+            made = await anyio.to_thread.run_sync(lambda: pilot.create(
+                org, design["description"], caller.contact_email, event_end, design,
+                BATCH_MAX_PASSES, keep_colors=True, kind="batch", sample_row=rows[0]), limiter=BUILD_LIMITER)
+        except ValueError as e:  # PassBuildError: a bad image URL, or a design that doesn't sign
+            _log_failure(pass_builder.PassBuildError(str(e)), caller, "create", style, org, None, start)
+            raise PassRejected(f"the design doesn't build: {e}; nothing was charged", 400) from None
+        p, key, new_batch = pilot.with_design(made["pilot"]), made["key"], True
+    style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
     try:
         async with _pilot_lock(p["id"]):
             fresh = [t for t in unique if t not in pilot.live_tickets(p["id"])]
@@ -1547,8 +1553,10 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
             if total + len(fresh) > p["max_passes"]:
                 raise PassRejected(f"a batch holds at most {p['max_passes']} passes; it has {total} and this call "
                                    f"would add {len(fresh)}", 400)
-            verified = (await anyio.to_thread.run_sync(lambda: _batch_charge(
-                caller, len(fresh), tool, "/api/batches", "create", style, org)) if fresh else None)
+            if not new_batch and fresh:
+                verified = await anyio.to_thread.run_sync(lambda: _gate(
+                    caller, len(fresh), free_tier=False, tool=tool, path="/api/batches", action="create",
+                    style=style, org=org))
             results: dict = {}
             sem = anyio.Semaphore(BATCH_BUILDS_AT_ONCE)
 
@@ -1574,16 +1582,13 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
                 _log_failure(e, caller, "create", style, org, None, start)
                 raise PassRejected(f"could not build the pass for {unique[ticket]['name']} ({ticket}): "
                                    f"{e if built else 'internal error'}; nothing was charged", 400 if built else 500)
-            receipt = None
-            if verified:
-                try:
-                    receipt = await anyio.to_thread.run_sync(
-                        lambda: _batch_settle(caller, verified, tool, "/api/batches", len(fresh)))
-                except PassRejected:
-                    pilot.unissue(p["id"], new_serials)
-                    _log(caller, style=style, organization_name=org, success=False, error="payment settlement failed",
-                         duration_ms=int((time.monotonic() - start) * 1000), serial_number=None, action="create")
-                    raise
+            try:
+                receipt = await anyio.to_thread.run_sync(
+                    lambda: _settle(verified, lambda: pilot.unissue(p["id"], new_serials)))
+            except payments.PaymentError as e:
+                _log(caller, style=style, organization_name=org, success=False, error="payment settlement failed",
+                     duration_ms=int((time.monotonic() - start) * 1000), serial_number=None, action="create")
+                raise _payment_required(caller, tool, "/api/batches", str(e), len(fresh), free_tier=False) from None
     except BaseException:
         if new_batch:
             pilot.delete(p["id"])
@@ -1630,28 +1635,34 @@ async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x4
             raise PassRejected("this batch has no live passes to update", 400)
         merged = pilot.merge_changes(p["design_obj"], changes)
 
+        path = f"/api/batches/{p['id']}"
+
         def check_all():
-            """Every pass's contents must be valid before anything is charged: the sample is signed (images,
-            size), the rest only have their pass.json built, which is where per-attendee values can fail."""
-            _build_pkpass(pilot.fill(merged, targets[0]), str(uuid.uuid4()), None)
+            """Every pass's pass.json must build before anything is charged: that is where per-attendee
+            values can fail. Cheap (nothing is signed), so it runs before the payment gate."""
             for row in targets:
-                filled = pilot.fill(merged, row)
                 try:
-                    pass_builder.build_pass_json(**{k: filled.get(k) for k in _PASS_JSON_PARAMS if k in filled},
-                                                 serial_number=row["serial"], web_service_url="https://x",
-                                                 authentication_token=row["auth_token"])
+                    _check_pass_json(pilot.fill(merged, row), row["serial"], row["auth_token"])
                 except pass_builder.PassBuildError as e:
                     raise pass_builder.PassBuildError(f"{row['name']} ({row['ticket']}): {e}") from None
 
         try:
-            await anyio.to_thread.run_sync(check_all, limiter=BUILD_LIMITER)
+            await anyio.to_thread.run_sync(check_all)
         except pass_builder.PassBuildError as e:
             _log_failure(e, caller, "update", style, org, None, start)
             raise PassRejected(f"that change would not build: {e}; nothing was charged", 400) from None
-        verified = await anyio.to_thread.run_sync(lambda: _batch_charge(
-            caller, len(targets), tool, f"/api/batches/{p['id']}", "update", style, org))
-        receipt = await anyio.to_thread.run_sync(
-            lambda: _batch_settle(caller, verified, tool, f"/api/batches/{p['id']}", len(targets)))
+        verified = await anyio.to_thread.run_sync(lambda: _gate(
+            caller, len(targets), free_tier=False, tool=tool, path=path, action="update", style=style, org=org))
+        try:  # a sample is signed (images, size) once paid for, and before anything is charged
+            await anyio.to_thread.run_sync(lambda: _build_pkpass(pilot.fill(merged, targets[0]), str(uuid.uuid4()),
+                                                                 None), limiter=BUILD_LIMITER)
+        except pass_builder.PassBuildError as e:
+            _log_failure(e, caller, "update", style, org, None, start)
+            raise PassRejected(f"that change would not build: {e}; nothing was charged", 400) from None
+        try:
+            receipt = await anyio.to_thread.run_sync(lambda: _settle(verified, lambda: None))
+        except payments.PaymentError as e:
+            raise _payment_required(caller, tool, path, str(e), len(targets), free_tier=False) from None
         pilot.save_design(p["id"], merged)
         p["design_obj"] = merged
         done, failed = [], 0

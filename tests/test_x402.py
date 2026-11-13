@@ -331,6 +331,26 @@ def capacity_tests():
     finally:
         proc.terminate(); proc.wait()
 
+    # Facilitator down: one behaviour for singles and batches, a 503 (retry later), refusal logged.
+    proc, base, db_path = start_server("http://127.0.0.1:9", ip_limit=0)
+    try:
+        r = httpx.post(f"{base}/api/passes", json=PASS)
+        check("facilitator down, past the free limit -> 503 naming the limit",
+              r.status_code == 503 and r.json()["error"].startswith("payments are unavailable")
+              and "rate limit exceeded" in r.json()["error"], r.text)
+        end = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 86400))
+        r = httpx.post(f"{base}/api/batches", json={"design": {"organization_name": "B", "description": "d"},
+                                                     "event_end": end, "rows": [{"name": "A", "ticket": "1"}], **CALLER})
+        check("facilitator down, batch -> 503", r.status_code == 503 and "payments are unavailable" in r.json()["error"],
+              r.text)
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute("SELECT error FROM requests WHERE refused = 1 ORDER BY id").fetchall()
+        check("both refusals logged refused=1 with the unchanged texts",
+              len(rows) == 2 and rows[0][0].startswith("rate limit exceeded")
+              and rows[1][0].startswith("Batches are paid: 1 new pass at"), rows)
+    finally:
+        proc.terminate(); proc.wait()
+
     proc, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MIN_FREE_DISK_GB="1000000")
     try:
         r = httpx.post(f"{base}/api/passes", json=PASS)
