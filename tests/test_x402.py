@@ -6,9 +6,7 @@ With --live, also sends a real signed payment from an unfunded wallet to the rea
 Base mainnet; it must come back refused for lack of funds (proving the wire format end to end,
 with nothing charged).
 Run: .venv/bin/python tests/test_x402.py [--live]"""
-import asyncio, atexit, base64, json, os, shutil, socket, sqlite3, subprocess, sys, tempfile, threading, time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+import asyncio, base64, json, sqlite3, sys, time
 
 import httpx2 as httpx  # the mcp SDK v2 ships httpx2
 from eth_account import Account
@@ -19,81 +17,18 @@ from x402.mechanisms.evm.exact import ExactEvmClientScheme
 from x402.mechanisms.evm.signers import EthAccountSigner
 from x402.schemas import PaymentRequired
 
-ROOT = Path(__file__).resolve().parent.parent
-NETWORK = "eip155:8453"
-PAY_TO = "0x000000000000000000000000000000000000dEaD"
-fails = 0
+import _harness
+from _harness import NETWORK, PAY_TO, Facilitator, Server, check, finish
 
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-# --- fake facilitator: mode decides what /verify and /settle answer ---
-mode = {"verify": True, "settle": True}
-seen = []
-
-
-class Facilitator(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def _send(self, body):
-        data = json.dumps(body).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        self._send({"kinds": [{"x402Version": 2, "scheme": "exact", "network": NETWORK}],
-                    "extensions": [], "signers": {}})
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
-        seen.append((self.path, body))
-        if self.path.endswith("/verify"):
-            self._send({"isValid": True, "payer": "0xpayer"} if mode["verify"]
-                       else {"isValid": False, "invalidReason": "insufficient_funds", "payer": "0xpayer"})
-        elif mode["settle"]:
-            self._send({"success": True, "transaction": "0xfeed", "network": NETWORK, "payer": "0xpayer"})
-        else:
-            self._send({"success": False, "errorReason": "nonce_used", "transaction": "", "network": NETWORK})
-
-
-def downloads_dir(db_path: Path) -> Path:
-    """Per-run downloads dir on the real disk: /tmp is a small tmpfs here, which trips the low-disk guard."""
-    return Path("/var/tmp") / f"wallet-mcp-test-{db_path.parent.name}"
+# One fake facilitator for every server below: mode decides what /verify and /settle answer.
+fac = Facilitator()
+mode, seen = fac.mode, fac.seen
 
 
 def start_server(facilitator_url, ip_limit, global_limit=500, **extra_env):
-    port = free_port()
-    base = f"http://127.0.0.1:{port}"
-    db_path = Path(tempfile.mkdtemp()) / "test.db"
-    atexit.register(shutil.rmtree, downloads_dir(db_path), True)
-    env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT=str(ip_limit),
-               WALLET_MCP_GLOBAL_LIMIT=str(global_limit),
-               WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}",
-               WALLET_MCP_X402_PAY_TO=PAY_TO, WALLET_MCP_X402_FACILITATOR=facilitator_url,
-               WALLET_MCP_DOWNLOADS=str(downloads_dir(db_path)), **extra_env)
-    proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(100):
-        try:
-            httpx.get(f"{base}/api/stats", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.1)
-    return proc, base, db_path
+    srv = Server({"WALLET_MCP_IP_LIMIT": str(ip_limit), "WALLET_MCP_GLOBAL_LIMIT": str(global_limit),
+                  "WALLET_MCP_X402_PAY_TO": PAY_TO, "WALLET_MCP_X402_FACILITATOR": facilitator_url, **extra_env})
+    return srv, srv.base, srv.db_path
 
 
 payer = x402ClientSync()
@@ -125,9 +60,7 @@ PASS = {"style": "generic", "organization_name": "x402 Test", "description": "te
 
 
 def offline_tests():
-    fac = ThreadingHTTPServer(("127.0.0.1", 0), Facilitator)
-    threading.Thread(target=fac.serve_forever, daemon=True).start()
-    proc, base, db_path = start_server(f"http://127.0.0.1:{fac.server_port}", ip_limit=2)
+    srv, base, db_path = start_server(fac.url, ip_limit=2)
 
     def rows():
         with sqlite3.connect(db_path) as conn:
@@ -200,7 +133,7 @@ def offline_tests():
         check("failed settlement leaves the stored pass unchanged", params["organization_name"] == "x402 Test", params)
         check("failed settlement logged as a failure", rows()[-1][:2] == ("update", 0) and "nonce_used" in rows()[-1][2],
               rows()[-1])
-        downloads = downloads_dir(db_path)
+        downloads = srv.downloads
         before = set(downloads.glob("*.pkpass"))
         create = {**PASS, "updatable": True, "serial_number": "settle-fails"}
         r = httpx.post(f"{base}/api/passes", json=create)
@@ -265,11 +198,10 @@ def offline_tests():
         check("MCP paid update via x402_payment argument -> ok",
               not res.is_error and res.structured_content["payment"]["transaction"] == "0xfeed", res)
     finally:
-        proc.terminate()
-        proc.wait()
+        srv.stop()
 
     # Global cap: payment lifts it too, and paid calls don't use up the free budget.
-    proc, base, db_path = start_server(f"http://127.0.0.1:{fac.server_port}", ip_limit=100, global_limit=2)
+    srv, base, db_path = start_server(fac.url, ip_limit=100, global_limit=2)
     try:
         for ip in ("198.51.100.1", "198.51.100.2"):
             httpx.post(f"{base}/api/passes", json=PASS, headers={"x-real-ip": ip})
@@ -287,11 +219,10 @@ def offline_tests():
                 "SELECT COUNT(*) FROM requests WHERE payment_tx IS NULL AND refused = 0").fetchone()[0]
         check("paid calls and refusals aren't counted towards the free budget", free_today == 2, free_today)
     finally:
-        proc.terminate()
-        proc.wait()
+        srv.stop()
 
     # Refusals don't drain the shared pool: one IP retrying past its own limit can't lock others out.
-    proc, base, db_path = start_server(f"http://127.0.0.1:{fac.server_port}", ip_limit=1, global_limit=3)
+    srv, base, db_path = start_server(fac.url, ip_limit=1, global_limit=3)
     try:
         hog = {"x-real-ip": "198.51.100.20"}
         httpx.post(f"{base}/api/passes", json=PASS, headers=hog)
@@ -304,16 +235,12 @@ def offline_tests():
             refused = conn.execute("SELECT COUNT(*) FROM requests WHERE refused = 1").fetchone()[0]
         check("the retries are logged as refused", refused == 5, refused)
     finally:
-        proc.terminate()
-        proc.wait()
-        fac.shutdown()
+        srv.stop()
 
 
 def capacity_tests():
-    fac = ThreadingHTTPServer(("127.0.0.1", 0), Facilitator)
-    threading.Thread(target=fac.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{fac.server_port}"
-    proc, base, _ = start_server(url, ip_limit=0, WALLET_MCP_PAID_IP_LIMIT="1", WALLET_MCP_PAID_GLOBAL_LIMIT="2")
+    url = fac.url
+    srv, base, _ = start_server(url, ip_limit=0, WALLET_MCP_PAID_IP_LIMIT="1", WALLET_MCP_PAID_GLOBAL_LIMIT="2")
     try:
         def paid(ip):
             h = {"x-real-ip": ip}
@@ -329,10 +256,10 @@ def capacity_tests():
         r = paid("198.51.100.12")
         check("paid global cap -> 429", r.status_code == 429 and "paid passes too" in r.json()["error"], r.text)
     finally:
-        proc.terminate(); proc.wait()
+        srv.stop()
 
     # Facilitator down: one behaviour for singles and batches, a 503 (retry later), refusal logged.
-    proc, base, db_path = start_server("http://127.0.0.1:9", ip_limit=0)
+    srv, base, db_path = start_server("http://127.0.0.1:9", ip_limit=0)
     try:
         r = httpx.post(f"{base}/api/passes", json=PASS)
         check("facilitator down, past the free limit -> 503 naming the limit",
@@ -349,28 +276,27 @@ def capacity_tests():
               len(rows) == 2 and rows[0][0].startswith("rate limit exceeded")
               and rows[1][0].startswith("Batches are paid: 1 new pass at"), rows)
     finally:
-        proc.terminate(); proc.wait()
+        srv.stop()
 
-    proc, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MIN_FREE_DISK_GB="1000000")
+    srv, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MIN_FREE_DISK_GB="1000000")
     try:
         r = httpx.post(f"{base}/api/passes", json=PASS)
         check("low disk -> 503", r.status_code == 503 and "capacity" in r.json()["error"], r.text)
     finally:
-        proc.terminate(); proc.wait()
+        srv.stop()
 
-    proc, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MAX_PASS_KB="1")
+    srv, base, _ = start_server(url, ip_limit=100, WALLET_MCP_MAX_PASS_KB="1")
     try:
         r = httpx.post(f"{base}/api/passes", json=PASS)
         check("oversized pass -> 400 naming the limit", r.status_code == 400 and "limit is" in r.json()["error"], r.text)
         res = asyncio.run(mcp_call(base, "create_wallet_pass", PASS))
         check("oversized pass over MCP -> tool error", res.is_error and "Use smaller images" in res.content[0].text, res)
     finally:
-        proc.terminate(); proc.wait()
-        fac.shutdown()
+        srv.stop()
 
 
 def live_test():
-    proc, base, _ = start_server("https://facilitator.payai.network", ip_limit=0)
+    srv, base, _ = start_server("https://facilitator.payai.network", ip_limit=0)
     try:
         r = httpx.post(f"{base}/api/passes", json=PASS, timeout=30)
         check("live: real facilitator -> 402 PaymentRequired", r.status_code == 402 and r.json()["accepts"], r.text)
@@ -380,13 +306,12 @@ def live_test():
               r.status_code == 402 and "verification failed" in r.json()["error"], r.text)
         print("     facilitator said:", r.json().get("error", "")[:200])
     finally:
-        proc.terminate()
-        proc.wait()
+        srv.stop()
 
 
 offline_tests()
 capacity_tests()
 if "--live" in sys.argv:
     live_test()
-print("ALL PASSED" if not fails else f"{fails} FAILED")
-sys.exit(1 if fails else 0)
+fac.shutdown()
+finish("ALL PASSED" if not _harness.fails else f"{_harness.fails} FAILED")

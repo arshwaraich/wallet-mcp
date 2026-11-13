@@ -1,38 +1,17 @@
 """Tests that every request logs its client (MCP clientInfo or User-Agent) and whether it carried an
 x402 payment. Starts a real server on a spare port with a throwaway db, never the production one.
 Run: .venv/bin/python tests/test_caller_log.py"""
-import asyncio, os, socket, sqlite3, subprocess, sys, tempfile, time
-from pathlib import Path
+import asyncio, sqlite3
 
 import httpx2 as httpx  # the mcp SDK v2 ships httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Implementation
 
-ROOT = Path(__file__).resolve().parent.parent
-fails = 0
+from _harness import Server, check, finish
 
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-tmp = tempfile.mkdtemp()
-port = free_port()
-base = f"http://127.0.0.1:{port}"
-db_path = Path(tmp) / "test.db"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT="100",
-           WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}")
-proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv = Server({"WALLET_MCP_IP_LIMIT": "100"})
+base, db_path = srv.base, srv.db_path
 CALLER = {"contact_email": "caller@realco.dev", "x402_ready": False}
 PASS = {"style": "generic", "organization_name": "Caller Test", "description": "test pass", **CALLER}
 
@@ -57,13 +36,6 @@ async def mcp_call(tool, args, meta=None):
 
 
 try:
-    for _ in range(100):
-        try:
-            httpx.get(f"{base}/api/stats", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.1)
-
     # --- optional contact_email and x402_ready ---
     def info():
         with sqlite3.connect(db_path) as conn:
@@ -162,8 +134,6 @@ try:
           info["refused_calls"] > 0 and info["refused_ips"] == info["refused_ips_through"] == 1, info)
     check("recent rows carry both fields", {"contact_email", "x402_ready"} <= set(stats["recent"][0]), stats["recent"][0])
 finally:
-    proc.terminate()
-    proc.wait()
+    srv.stop()
 
-print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
-sys.exit(1 if fails else 0)
+finish()

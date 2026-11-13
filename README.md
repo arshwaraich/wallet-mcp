@@ -158,6 +158,7 @@ curl https://walletmcppass.com/api/passes \
 | 200 | Same as the tool: `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }` |
 | 400 | `{"error": "invalid request", "details": [...]}` for a malformed body or wrong types; `{"error": "..."}` when the pass itself is invalid |
 | 402 | Past a free limit (per-IP or global): an x402 `PaymentRequired` body (also base64'd in the `PAYMENT-REQUIRED` header). Retry with a payment, see [below](#paying-with-x402) |
+| 413 | `{"error": "request body too large"}` above 3 MB (base64 images count; a proxy may cap lower, nginx's default is 1 MB) |
 | 429 | `{"error": "rate limit exceeded: ..."}` or `"service is at its daily request limit ..."` — only when payments are off |
 | 500 | `{"error": "internal error building the pass"}` |
 
@@ -216,6 +217,7 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
    ```
    Buffering has to be off or the SSE stream stalls through the proxy.
 6. Run it under a process supervisor so it survives crashes and reboots — `wallet-mcp.service` in this repo is a working example (systemd, `Restart=on-failure`, `WantedBy=multi-user.target`).
+7. Tests: `tests/run_all.sh` runs every `tests/test_*.py` (each also runs alone, e.g. `.venv/bin/python tests/test_api.py`) and exits non-zero if any fails. Shared plumbing (spare ports, a server on a throwaway db, a fake x402 facilitator) is in `tests/_harness.py`; nothing touches the production db or downloads.
 
 ## Rate limiting
 

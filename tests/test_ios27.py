@@ -4,15 +4,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import image_gen, pass_builder as pb
+from _harness import check, finish
 
 BASE = dict(organization_name="Test Org", description="test", serial_number="s1")
-fails = 0
-
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
 
 
 def raises(name, fn, needle):
@@ -142,5 +136,4 @@ raises("locations: relevantText must be text", lambda: pb.build_pass_json(style=
 raises("max_distance: needs locations", lambda: pb.build_pass_json(style="generic", max_distance=100, **BASE), "only applies with locations")
 raises("max_distance: positive", lambda: pb.build_pass_json(style="generic", locations=locs, max_distance=0, **BASE), "positive number")
 
-print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
-sys.exit(1 if fails else 0)
+finish()

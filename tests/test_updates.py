@@ -1,31 +1,18 @@
 """End-to-end tests for updatable passes (PassKit web service + APNs push) and image URLs.
 Starts a real server on a spare port with a throwaway db and a fake APNs, never the production ones.
 Run: .venv/bin/python tests/test_updates.py"""
-import asyncio, datetime, inspect, io, json, os, sqlite3, socket, subprocess, sys, tempfile, threading, time, zipfile
+import asyncio, datetime, inspect, io, json, os, sqlite3, sys, threading, time, zipfile
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 
 import httpx2 as httpx  # the mcp SDK v2 ships httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-ROOT = Path(__file__).resolve().parent.parent
-fails = 0
+from _harness import ROOT, Server, check, finish, free_port
+
 LIVE_TOKEN, DEAD_TOKEN = "aa" * 32, "bb" * 32
 pushes = []
-
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class FakeAPNs(BaseHTTPRequestHandler):
@@ -54,23 +41,9 @@ apns_port = free_port()
 apns = HTTPServer(("127.0.0.1", apns_port), FakeAPNs)
 threading.Thread(target=apns.serve_forever, daemon=True).start()
 
-tmp = tempfile.mkdtemp()
-port = free_port()
-base = f"http://127.0.0.1:{port}"
-db_path = Path(tmp) / "test.db"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT="100",
-           WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}",
-           WALLET_MCP_APNS_URL=f"http://127.0.0.1:{apns_port}")
-proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv = Server({"WALLET_MCP_IP_LIMIT": "100", "WALLET_MCP_APNS_URL": f"http://127.0.0.1:{apns_port}"})
+base, db_path, tmp = srv.base, srv.db_path, srv.tmp
 try:
-    for _ in range(100):
-        try:
-            httpx.get(f"{base}/api/stats", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.1)
-
     PASS = {"style": "storeCard", "organization_name": "Bean Club", "description": "loyalty card", "contact_email": "t@realco.dev", "x402_ready": False,
             "primary_fields": [{"key": "points", "label": "Points", "value": "100",
                                 "changeMessage": "You now have %@ points"}],
@@ -219,16 +192,14 @@ try:
         files = pass_files(httpx.get(r.json()["download_url"]).content)
         check("fetched images are in the pass", {"logo.png", "thumbnail.png"} <= files, files)
 finally:
-    proc.terminate()
-    proc.wait()
+    srv.stop()
 
 # the update tool must offer exactly the create tool's pass parameters
 sys.path.insert(0, str(ROOT))
-os.environ["WALLET_MCP_DB"] = str(Path(tmp) / "sig.db")
+os.environ["WALLET_MCP_DB"] = str(tmp / "sig.db")
 import server  # noqa: E402
 create = set(inspect.signature(server.create_wallet_pass).parameters) - {"ctx", "serial_number", "updatable", "updatable_hours"}
 update = set(inspect.signature(server.update_wallet_pass).parameters) - {"ctx", "serial_number", "edit_token"}
 check("update tool params match create tool params", create == update, create ^ update)
 
-print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
-sys.exit(1 if fails else 0)
+finish()
