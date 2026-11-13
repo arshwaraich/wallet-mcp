@@ -454,7 +454,7 @@ async def create_wallet_pass(
     params = {k: v for k, v in locals().items() if k != "ctx"}
     caller = Caller.from_mcp(ctx)
     try:
-        return _mcp_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params), limiter=BUILD_LIMITER))
+        return _mcp_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, params), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _mcp_rejection(e)
 
@@ -575,65 +575,23 @@ class PassRejected(Exception):
         self.payment_required = payment_required  # x402 PaymentRequired body, for status 402
 
 
-def _create_pass(
-    caller: Caller,
-    *,
-    style: str,
-    organization_name: str,
-    description: str,
-    logo_text: str | None = None,
-    transit_type: str | None = None,
-    barcode_message: str | None = None,
-    barcode_format: str | list[str] = "QR",
-    background_color: str | None = None,
-    foreground_color: str | None = None,
-    label_color: str | None = None,
-    relevant_date: str | None = None,
-    expiration_date: str | None = None,
-    voided: bool = False,
-    primary_fields: list[dict] | None = None,
-    secondary_fields: list[dict] | None = None,
-    auxiliary_fields: list[dict] | None = None,
-    header_fields: list[dict] | None = None,
-    back_fields: list[dict] | None = None,
-    serial_number: str | None = None,
-    icon_color: str = DEFAULT_ICON_COLOR,
-    icon_text: str | None = None,
-    logo_color: str | None = None,
-    icon_png_b64: str | None = None,
-    logo_png_b64: str | None = None,
-    generate_logo: bool = True,
-    poster: bool = False,
-    footer_fields: list[dict] | None = None,
-    background_png_b64: str | None = None,
-    featured_actions: list[dict] | None = None,
-    barcode_alt_text: str | None = None,
-    semantics: dict | None = None,
-    semantic_layout: bool = False,
-    info_links: dict | None = None,
-    primary_logo_png_b64: str | None = None,
-    secondary_logo_png_b64: str | None = None,
-    strip_png_b64: str | None = None,
-    thumbnail_png_b64: str | None = None,
-    artwork_png_b64: str | None = None,
-    locations: list[dict] | None = None,
-    max_distance: float | None = None,
-    updatable: bool = False,
-    updatable_hours: int = 1,
-    contact_email: str | None = None,
-    x402_ready: bool | Literal["unknown"] | None = None,
-    x402_payment: dict | str | None = None,
-) -> dict:
-    """Rate-limit, build, sign and log one pass."""
-    params = {k: v for k, v in locals().items()
-              if k not in ("caller", "serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready",
-                           "x402_payment")}
+# create_wallet_pass parameters that are about the call (or the pass's identity and storage), not its design.
+_CALL_PARAMS = ("serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready", "x402_payment")
+
+
+def _create_pass(caller: Caller, request: dict) -> dict:
+    """Rate-limit, build, sign and log one pass. request holds every create_wallet_pass parameter
+    (defaults filled in), as the tool gets them or as _PassRequest validates them."""
+    style, organization_name = request["style"], request["organization_name"]
+    updatable, updatable_hours = request["updatable"], request["updatable_hours"]
+    params = {k: v for k, v in request.items() if k not in _CALL_PARAMS}
     start = time.monotonic()
-    caller = caller.with_payment_argument(x402_payment)
-    caller = _with_caller_info(caller, contact_email, x402_ready, "create", style, organization_name)
+    caller = caller.with_payment_argument(request["x402_payment"])
+    caller = _with_caller_info(caller, request["contact_email"], request["x402_ready"], "create", style,
+                               organization_name)
     paid = _check_rate_limit(caller, "create", style, organization_name)
 
-    serial = serial_number or str(uuid.uuid4())
+    serial = request["serial_number"] or str(uuid.uuid4())
     try:
         if not updatable and updatable_hours != 1:
             raise pass_builder.PassBuildError("updatable_hours only applies with updatable=True")
@@ -934,17 +892,28 @@ _PASS_JSON_PARAMS = [
 ]
 
 
-def _advertise_caller_info_as_required() -> None:
+def _tool_fields(tool, exclude=(), **defaults) -> dict:
+    """create_model field definitions for a tool's parameters (ctx left out): the same types and
+    defaults, except those overridden in defaults."""
+    return {
+        name: (param.annotation,
+               defaults.get(name, ... if param.default is inspect.Parameter.empty else param.default))
+        for name, param in inspect.signature(tool).parameters.items()
+        if name != "ctx" and name not in exclude
+    }
+
+
+def _advertise_caller_info_as_required(*tools) -> None:
     """Clients see both as required, while the functions default them to None so a call without them
     reaches _with_caller_info and gets logged instead of failing inside the MCP framework."""
-    for name in ("create_wallet_pass", "update_wallet_pass"):
-        schema = server._tool_manager.get_tool(name).parameters
+    for tool in tools:
+        schema = server._tool_manager.get_tool(tool.__name__).parameters
         schema["required"] = [*schema["required"], "contact_email", "x402_ready"]
         schema["properties"]["contact_email"] = {"type": "string", "title": "Contact Email"}
         schema["properties"]["x402_ready"] = {"enum": [True, False, "unknown"], "title": "X402 Ready"}
 
 
-_advertise_caller_info_as_required()
+_advertise_caller_info_as_required(create_wallet_pass, update_wallet_pass)
 
 
 @server.custom_route("/", methods=["GET"])
@@ -1006,15 +975,7 @@ async def api_requests_csv(request: Request) -> Response:
 
 # The REST body accepts exactly the tool's parameters, validated with the same
 # types, so the API and the MCP tool can't drift apart.
-_PassRequest = create_model(
-    "PassRequest",
-    __config__=ConfigDict(extra="forbid"),
-    **{
-        name: (param.annotation, ... if param.default is inspect.Parameter.empty else param.default)
-        for name, param in inspect.signature(_create_pass).parameters.items()
-        if param.kind is inspect.Parameter.KEYWORD_ONLY
-    },
-)
+_PassRequest = create_model("PassRequest", __config__=ConfigDict(extra="forbid"), **_tool_fields(create_wallet_pass))
 
 
 @server.custom_route("/api/passes", methods=["POST"])
@@ -1031,22 +992,15 @@ async def api_create_pass(request: Request) -> Response:
         return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
     try:
         caller = Caller.from_api(request)
-        return _api_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, **params), limiter=BUILD_LIMITER))
+        return _api_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, params), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _api_rejection(e)
     except Exception:
         return JSONResponse({"error": "internal error building the pass"}, status_code=500)
 
 
-_UpdateRequest = create_model(
-    "UpdateRequest",
-    __config__=ConfigDict(extra="forbid"),
-    **{
-        name: (param.annotation, ... if param.default is inspect.Parameter.empty else None)
-        for name, param in inspect.signature(update_wallet_pass).parameters.items()
-        if name not in ("ctx", "serial_number", "edit_token")
-    },
-)
+_UpdateRequest = create_model("UpdateRequest", __config__=ConfigDict(extra="forbid"),
+                              **_tool_fields(update_wallet_pass, exclude=("serial_number", "edit_token")))
 
 
 @server.custom_route("/api/passes/{serial}", methods=["PATCH"])
@@ -1471,17 +1425,8 @@ async def pilot_pass(request: Request) -> Response:
 BATCH_MAX_PASSES = int(os.environ.get("WALLET_MCP_BATCH_MAX_PASSES", 5000))
 BATCH_MAX_DAYS = 366  # event_end at most this far ahead (passes are stored until event_end + 7 days)
 BATCH_BUILDS_AT_ONCE = 2  # per call, so a big batch leaves BUILD_LIMITER slots for single passes
-_BATCH_DESIGN_EXCLUDED = ("serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready", "x402_payment")
-_BatchDesign = create_model(
-    "BatchDesign",
-    __config__=ConfigDict(extra="forbid"),
-    **{
-        name: (param.annotation, "eventTicket" if name == "style" else
-               ... if param.default is inspect.Parameter.empty else param.default)
-        for name, param in inspect.signature(_create_pass).parameters.items()
-        if param.kind is inspect.Parameter.KEYWORD_ONLY and name not in _BATCH_DESIGN_EXCLUDED
-    },
-)
+_BatchDesign = create_model("BatchDesign", __config__=ConfigDict(extra="forbid"),
+                            **_tool_fields(create_wallet_pass, exclude=_CALL_PARAMS, style="eventTicket"))
 
 
 def _batch_lead(rejection: str | None, count: int) -> str:
@@ -1852,10 +1797,7 @@ async def update_wallet_pass_batch(
 for _tool in (create_wallet_pass_batch, update_wallet_pass_batch):
     _tool_obj = server._tool_manager.get_tool(_tool.__name__)
     _tool_obj.description = _tool_obj.description.replace("{price}", payments.PRICE)
-    _schema = _tool_obj.parameters
-    _schema["required"] = [*_schema["required"], "contact_email", "x402_ready"]
-    _schema["properties"]["contact_email"] = {"type": "string", "title": "Contact Email"}
-    _schema["properties"]["x402_ready"] = {"enum": [True, False, "unknown"], "title": "X402 Ready"}
+_advertise_caller_info_as_required(create_wallet_pass_batch, update_wallet_pass_batch)
 
 
 async def _batch_api_body(request: Request):
