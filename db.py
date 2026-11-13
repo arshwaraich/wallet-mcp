@@ -241,20 +241,22 @@ def free_remaining(ip: str, contact_email: str | None = None) -> int:
     return per_ip_daily_limit(is_exempt(contact_email)) - used
 
 
-def check_paid_limit(ip: str) -> str | None:
-    """Returns an error string if the caller can't buy another call today, else None."""
+def check_paid_limit(ip: str, count: int = 1) -> str | None:
+    """Returns an error string if the caller can't buy `count` more passes today, else None."""
     today = _today_start()
     with _lock, _conn() as conn:
         (global_count,) = conn.execute(
             "SELECT COUNT(*) FROM requests WHERE ts >= ? AND payment_tx IS NOT NULL", (today,)
         ).fetchone()
-        if global_count >= PAID_GLOBAL_DAILY_LIMIT:
+        if global_count + count > PAID_GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit for paid passes too, try again tomorrow"
         (ip_count,) = conn.execute(
             "SELECT COUNT(*) FROM requests WHERE ts >= ? AND ip = ? AND payment_tx IS NOT NULL", (today, ip)
         ).fetchone()
-        if ip_count >= PAID_PER_IP_DAILY_LIMIT:
-            return f"rate limit exceeded: max {PAID_PER_IP_DAILY_LIMIT} paid passes/day per caller, on top of the free ones"
+        if ip_count + count > PAID_PER_IP_DAILY_LIMIT:
+            left = max(PAID_PER_IP_DAILY_LIMIT - ip_count, 0)
+            return (f"rate limit exceeded: max {PAID_PER_IP_DAILY_LIMIT} paid passes/day per caller, on top of the free ones"
+                    + (f" ({left} left today, this call needs {count})" if count > 1 else ""))
     return None
 
 

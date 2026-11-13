@@ -5,6 +5,10 @@ The pilot's design is a create_wallet_pass parameter set whose strings may hold 
 service and APNs push work unchanged) with an expiry of event_end + 7 days, and tracked here in
 pilot_passes. HTTP routes live in server.py; this module is the data layer and the admin CLI:
 
+A "batch" is the same thing bought by a caller instead of set up by the operator: kind = 'batch', made
+through the create_wallet_pass_batch tool / POST /api/batches, paid per pass with x402, no sample pass.
+The free /api/pilot/{id}/issue and /update routes refuse batches.
+
     .venv/bin/python pilot.py new --org ... --event ... --contact EMAIL --event-end ISO --design design.json
     .venv/bin/python pilot.py list | show ID | preview ID OUT.json
 """
@@ -58,6 +62,8 @@ def init() -> None:
             email TEXT NOT NULL, type TEXT NOT NULL, created TEXT NOT NULL,
             PRIMARY KEY (pilot_id, ticket))""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pilot_passes_serial ON pilot_passes(serial)")
+        if "kind" not in {r[1] for r in conn.execute("PRAGMA table_info(pilots)")}:
+            conn.execute("ALTER TABLE pilots ADD COLUMN kind TEXT NOT NULL DEFAULT 'pilot'")
 
 
 def sha(token: str) -> str:
@@ -165,8 +171,10 @@ def existing_pass(pilot_id: str, ticket: str):
     return (r["serial"], r["auth_token"]) if r else None
 
 
-def issue_one(pilot: dict, row: dict, ip: str) -> dict:
-    """Issue (or find) the pass for one row. Synchronous: run it in a worker thread."""
+def issue_one(pilot: dict, row: dict, ip: str, logged: bool = True) -> dict:
+    """Issue (or find) the pass for one row. Synchronous: run it in a worker thread. logged=False
+    leaves logging to the caller (paid batches log only once the payment has settled); the result
+    then carries the new pass's serial."""
     started = time.monotonic()
     found = existing_pass(pilot["id"], row["ticket"])
     if found:
@@ -187,12 +195,31 @@ def issue_one(pilot: dict, row: dict, ip: str) -> dict:
             found = existing_pass(pilot["id"], row["ticket"])
             if found:
                 return {**row, "link": pass_link(*found), "new": False}
-            return issue_one(pilot, row, ip)
+            return issue_one(pilot, row, ip, logged)
     except Exception as e:
-        log(pilot, ip, success=False, error=str(e)[:300], started=started, serial=None, action="create")
+        if logged:
+            log(pilot, ip, success=False, error=str(e)[:300], started=started, serial=None, action="create")
         raise
-    log(pilot, ip, success=True, error=None, started=started, serial=serial, action="create")
-    return {**row, "link": pass_link(serial, auth), "new": True}
+    if logged:
+        log(pilot, ip, success=True, error=None, started=started, serial=serial, action="create")
+    return {**row, "link": pass_link(serial, auth), "new": True, "serial": serial}
+
+
+def unissue(pilot_id: str, serials: list[str]) -> None:
+    """Undo issue_one for these new passes (a paid batch whose payment didn't go through)."""
+    with db._lock, db._conn() as conn:
+        conn.executemany("DELETE FROM pilot_passes WHERE pilot_id = ? AND serial = ?", [(pilot_id, s) for s in serials])
+        conn.executemany("DELETE FROM registrations WHERE serial = ?", [(s,) for s in serials])
+        conn.executemany("DELETE FROM passes WHERE serial = ?", [(s,) for s in serials])
+
+
+def delete(pilot_id: str) -> None:
+    """Forget a pilot/batch row and its passes (a new batch whose payment didn't go through)."""
+    with db._lock, db._conn() as conn:
+        serials = [r[0] for r in conn.execute("SELECT serial FROM pilot_passes WHERE pilot_id = ?", (pilot_id,))]
+    unissue(pilot_id, serials)
+    with db._lock, db._conn() as conn:
+        conn.execute("DELETE FROM pilots WHERE id = ?", (pilot_id,))
 
 
 def issued_count(pilot_id: str) -> int:
@@ -335,33 +362,39 @@ def drop_dead_tokens(dead: list[str]) -> None:
 # ---------- creating (CLI) ----------
 
 def create(org: str, event: str, contact: str, event_end: str, design: dict, max_passes: int = DEFAULT_MAX_PASSES,
-           keep_colors: bool = False) -> dict:
+           keep_colors: bool = False, kind: str = "pilot", sample_row: dict | None = None) -> dict:
+    """A new pilot (operator CLI) or batch (paid, server.py). Raises ValueError if event_end is past,
+    pass_builder.PassBuildError if the design doesn't build. A batch gets no stored sample pass."""
     end = parse_end(event_end)
     if end.timestamp() + GRACE_SECONDS <= time.time():
-        raise SystemExit("event end is in the past")
+        raise ValueError("event end is in the past")
     design = normalize_design(_resolve(design), org, event)
     if not keep_colors:
         design = repair_design_colors(design)
+    if kind == "batch":
+        design = ensure_field_keys(design)
     pilot_id = next(i for i in (_new_id() for _ in range(50)) if get(i) is None)
     token = secrets.token_urlsafe(24)
     pilot = {"id": pilot_id, "key_hash": sha(token), "org": org, "event_name": event,
              "event_end": end.isoformat(timespec="seconds"), "event_end_epoch": int(end.timestamp()),
              "contact_email": contact, "design": json.dumps(design), "max_passes": max_passes,
-             "sample_serial": None, "created": db._now()}
+             "sample_serial": None, "created": db._now(), "kind": kind}
     pilot = with_design(pilot)
     serial, auth = str(uuid.uuid4()), secrets.token_urlsafe(24)
-    params = fill(design, SAMPLE_ROW)
+    params = fill(design, sample_row or SAMPLE_ROW)  # a batch checks with a real row: barcodes may need digits
     pkpass = _build(params, serial, auth)  # raises before anything is stored if the design is invalid
-    db.store_pass(serial, auth, sha(secrets.token_urlsafe(24)), json.dumps(params), pkpass, int(time.time()),
-                  expires_epoch(pilot))
-    pilot["sample_serial"] = serial
+    if kind != "batch":
+        db.store_pass(serial, auth, sha(secrets.token_urlsafe(24)), json.dumps(params), pkpass, int(time.time()),
+                      expires_epoch(pilot))
+        pilot["sample_serial"] = serial
     cols = ("id", "key_hash", "org", "event_name", "event_end", "event_end_epoch", "contact_email", "design",
-            "max_passes", "sample_serial", "created")
+            "max_passes", "sample_serial", "created", "kind")
     with db._lock, db._conn() as conn:
         conn.execute(f"INSERT INTO pilots ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                      [pilot[c] for c in cols])
     return {"id": pilot_id, "key": f"{pilot_id}.{token}", "organizer_url": f"{ORGANIZER_URL}/?event={pilot_id}.{token}",
-            "sample_url": pass_link(serial, auth), "design": design}
+            "sample_url": pass_link(serial, auth) if kind != "batch" else None, "design": design,
+            "pilot": {**pilot, "design": json.dumps(design), "design_obj": design}}
 
 
 def _new_id() -> str:
@@ -406,7 +439,10 @@ def main(argv=None) -> None:
         design = json.loads(Path(args.design).read_text())
         if isinstance(design.get("design"), dict):  # also accept the {design, sample} files of tools/shot.js and samples/
             design = design["design"]
-        r = P.create(args.org, args.event, args.contact, args.event_end, design, args.max, args.keep_colors)
+        try:
+            r = P.create(args.org, args.event, args.contact, args.event_end, design, args.max, args.keep_colors)
+        except ValueError as e:
+            raise SystemExit(str(e))
         print(f"id:            {r['id']}\nkey:           {r['key']}\norganizer URL: {r['organizer_url']}\n"
               f"sample link:   {r['sample_url']}")
         if not args.keep_colors and r["design"].get("background_color"):
@@ -417,7 +453,7 @@ def main(argv=None) -> None:
         with db._lock, db._conn() as conn:
             rows = conn.execute("SELECT * FROM pilots ORDER BY created").fetchall()
         for r in rows:
-            print(f"{r['id']}  {r['org']} / {r['event_name']}  ends {r['event_end']}  "
+            print(f"{r['id']}  [{r['kind']}] {r['org']} / {r['event_name']}  ends {r['event_end']}  "
                   f"{P.issued_count(r['id'])}/{r['max_passes']} issued  {r['contact_email']}")
         return
     pilot = P.get(args.id)

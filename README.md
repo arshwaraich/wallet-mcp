@@ -258,6 +258,19 @@ A free pilot for event organizers: one design, one updatable pass per attendee, 
 - `clean` finds the header by heuristic; only if unsure it asks `claude -p --model haiku` (first 25 rows, mapping plan only; code applies it to every row). Needs `claude` on the service's PATH, otherwise it silently falls back to the heuristic.
 - Tests: `.venv/bin/python tests/test_pilot.py` (set `WALLET_MCP_MIN_FREE_DISK_GB=1` is done by the test itself).
 
+## Bulk passes (paid batches): `create_wallet_pass_batch` / `POST /api/batches`
+
+The organizer bulk upload, open to any caller and paid: one design (create_wallet_pass's parameters, strings may use `{name} {ticket} {type} {email}`) plus attendee rows `{name, ticket, type?, email?}` gives one permanent, updatable link per attendee (`/pass/{serial}/{auth_token}`, live until `event_end` + 7 days). **No free tier:** every new pass costs `WALLET_MCP_X402_PRICE` ($0.01), and a batch update costs that per pass in the batch, each paid as ONE x402 payment for the whole call (the 402 quotes the exact total). Nothing is charged unless every pass builds; a failed settlement rolls the new passes (and a new batch) back. Re-sending a ticket already in the batch is free and returns the same link.
+
+| MCP tool | REST | |
+|---|---|---|
+| `create_wallet_pass_batch(design, event_end, rows, ...)` | `POST /api/batches` | new batch; returns `batch_key` once |
+| `create_wallet_pass_batch(batch_key, rows, ...)` | `POST /api/batches/{id}/passes` + `Authorization: Bearer <batch_key>` | more attendees |
+| `update_wallet_pass_batch(batch_key, header_fields..., change_message, ...)` | `PATCH /api/batches/{id}` + Bearer | re-sign every pass + APNs push |
+| | `GET /api/batches/{id}` + Bearer (or `?key=`) | all links; `links_csv_url` also works |
+
+All take `contact_email` + `x402_ready` (required) and `x402_payment` (or `_meta["x402/payment"]` / `PAYMENT-SIGNATURE`). Limits: <=1000 rows per call, `WALLET_MCP_BATCH_MAX_PASSES` (5000) per batch, `event_end` within 366 days, and the paid daily caps count passes, not calls. Builds run 2 at a time per call (~20 ms each). Batches are pilots with `kind='batch'`; the free `/api/pilot/{id}/issue|clean|update` routes refuse them. Each pass is logged as its own `requests` row carrying the shared `payment_tx`, so revenue (rows x $0.01) stays right. Tests: `.venv/bin/python tests/test_batch.py`. Nginx block: `deploy/nginx-batches.conf`.
+
 ## Capacity guards
 
 These stop any caller, paying or not, from taking the box down:
