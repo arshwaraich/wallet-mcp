@@ -3,9 +3,7 @@
 settlement, batch update re-signs + charges per pass, pilot routes refuse batches, paid caps. Fake facilitator,
 real x402 signing with a throwaway key, real server on a throwaway db.
 Run: .venv/bin/python tests/test_batch.py"""
-import asyncio, atexit, base64, json, os, shutil, socket, sqlite3, subprocess, sys, tempfile, threading, time, zipfile, io
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+import asyncio, base64, json, sqlite3, time, zipfile, io
 
 import httpx2 as httpx
 from eth_account import Account
@@ -16,78 +14,14 @@ from x402.mechanisms.evm.exact import ExactEvmClientScheme
 from x402.mechanisms.evm.signers import EthAccountSigner
 from x402.schemas import PaymentRequired
 
-ROOT = Path(__file__).resolve().parent.parent
-NETWORK = "eip155:8453"
-PAY_TO = "0x000000000000000000000000000000000000dEaD"
-fails = 0
+import _harness
+from _harness import NETWORK, PAY_TO, Facilitator, Server, check, finish
 
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {str(detail)[:600]}" if detail and not cond else ""))
-    fails += 0 if cond else 1
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-mode = {"verify": True, "settle": True}
-seen = []
-
-
-class Facilitator(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def _send(self, body):
-        data = json.dumps(body).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        self._send({"kinds": [{"x402Version": 2, "scheme": "exact", "network": NETWORK}], "extensions": [], "signers": {}})
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
-        seen.append((self.path, body))
-        if self.path.endswith("/verify"):
-            self._send({"isValid": True, "payer": "0xpayer"} if mode["verify"]
-                       else {"isValid": False, "invalidReason": "insufficient_funds", "payer": "0xpayer"})
-        elif mode["settle"]:
-            self._send({"success": True, "transaction": "0xbatch", "network": NETWORK, "payer": "0xpayer"})
-        else:
-            self._send({"success": False, "errorReason": "nonce_used", "transaction": "", "network": NETWORK})
-
-
-fac = ThreadingHTTPServer(("127.0.0.1", 0), Facilitator)
-threading.Thread(target=fac.serve_forever, daemon=True).start()
-
-port = free_port()
-base = f"http://127.0.0.1:{port}"
-tmp = Path(tempfile.mkdtemp())
-dl = Path("/var/tmp") / f"wallet-mcp-test-batch-{tmp.name}"  # /tmp is a small tmpfs that trips the disk guard
-atexit.register(shutil.rmtree, dl, True)
-atexit.register(shutil.rmtree, tmp, True)
-db_path = tmp / "test.db"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT="10",
-           WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}", WALLET_MCP_X402_PAY_TO=PAY_TO,
-           WALLET_MCP_X402_FACILITATOR=f"http://127.0.0.1:{fac.server_port}", WALLET_MCP_DOWNLOADS=str(dl),
-           WALLET_MCP_PREVIEWS=str(tmp / "previews"), WALLET_MCP_PAID_IP_LIMIT="40",
-           WALLET_MCP_APNS_URL="http://127.0.0.1:9")
-proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
-                        stdout=subprocess.DEVNULL, stderr=open(tmp / "server.log", "w"))
-for _ in range(100):
-    try:
-        httpx.get(f"{base}/api/stats", timeout=1)
-        break
-    except httpx.HTTPError:
-        time.sleep(0.1)
+fac = Facilitator(tx="0xbatch")
+mode, seen = fac.mode, fac.seen
+srv = Server({"WALLET_MCP_IP_LIMIT": "10", "WALLET_MCP_X402_PAY_TO": PAY_TO, "WALLET_MCP_X402_FACILITATOR": fac.url,
+              "WALLET_MCP_PAID_IP_LIMIT": "40"})
+base, db_path = srv.base, srv.db_path
 
 payer = x402ClientSync()
 payer.register(NETWORK, ExactEvmClientScheme(EthAccountSigner(Account.create())))
@@ -187,6 +121,34 @@ try:
     check("payment for the wrong amount -> 402 naming the price", r.status_code == 402 and "$0.01" in r.json()["error"], r.text)
     r = httpx.post(f"{base}/api/batches/{bid}/passes", json=more, headers={"authorization": "Bearer nope"}, timeout=30)
     check("wrong bearer -> 401", r.status_code == 401, r.text)
+    no_key = {"error": "send the batch_key as 'Authorization: Bearer <batch_key>'"}
+    r = httpx.patch(f"{base}/api/batches/{bid}", json={"change_message": "x %@"})
+    check("PATCH without a bearer -> 401 with the same message", r.status_code == 401 and r.json() == no_key, r.text)
+    r = httpx.post(f"{base}/api/batches/{bid}/passes", json=more, headers={"authorization": f"Bearer {bid}.wrong"})
+    check("well-formed but wrong key -> 404 unknown batch_key",
+          r.status_code == 404 and r.json() == {"error": "unknown batch_key"}, r.text)
+    r = httpx.post(f"{base}/api/batches", json={"design": DESIGN, "event_end": END, "rows": ROWS, "colour": 1,
+                                                "batch_key": key, **CALLER})
+    check("unknown fields on create -> 400 naming them",
+          r.status_code == 400 and r.json() == {"error": "unknown field(s): batch_key, colour"}, r.text)
+    r = httpx.post(f"{base}/api/batches/{bid}/passes", json={**more, "design": DESIGN}, headers=auth)
+    check("design on add -> 400 unknown field",
+          r.status_code == 400 and r.json() == {"error": "unknown field(s): design"}, r.text)
+    r = httpx.patch(f"{base}/api/batches/{bid}", json={"rows": ROWS}, headers=auth)
+    check("rows on update -> 400 unknown field", r.status_code == 400 and r.json() == {"error": "unknown field(s): rows"},
+          r.text)
+    r = httpx.patch(f"{base}/api/batches/{bid}", content=b"{", headers=auth)
+    check("non-JSON update body -> 400",
+          r.status_code == 400 and r.json() == {"error": "request body must be a JSON object"}, r.text)
+    r = httpx.post(f"{base}/api/batches", content=b"x" * (3 * 1024 * 1024 + 1))
+    check("batch body over 3 MB -> 413", r.status_code == 413 and r.json() == {"error": "request body too large"}, r.text)
+    r = httpx.get(f"{base}/api/batches/{bid}", params={"key": key.replace(".", ".x", 1)})
+    check("GET with a wrong key -> 404",
+          r.status_code == 404 and r.json() == {"error": "unknown batch or wrong batch_key"}, r.text)
+    r = httpx.get(f"{base}/api/batches/zzzzzzzz", headers=auth)
+    check("GET another id with this batch's key -> 404", r.status_code == 404, r.text)
+    r = httpx.get(f"{base}/api/batches/{bid}", params={"key": key})
+    check("GET with ?key= works", r.status_code == 200 and r.json()["batch_id"] == bid, r.text)
 
     # --- GET + links.csv ---
     r = httpx.get(f"{base}/api/batches/{bid}", headers=auth)
@@ -356,11 +318,9 @@ try:
                    headers={"x-real-ip": "10.9.9.9"})
     check("single free pass still works", r.status_code == 200 and r.json().get("download_url"), r.text)
 finally:
-    proc.terminate()
-    proc.wait()
+    srv.stop()
     fac.shutdown()
-    if fails:
-        print((tmp / "server.log").read_text()[-3000:])
+    if _harness.fails:
+        print(srv.log.read_text()[-3000:])
 
-print("ALL PASSED" if not fails else f"{fails} FAILED")
-sys.exit(1 if fails else 0)
+finish("ALL PASSED" if not _harness.fails else f"{_harness.fails} FAILED")

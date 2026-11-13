@@ -5,15 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pass_builder as pb
+from _harness import check, finish
 
 BASE = dict(organization_name="Test Org", description="test", serial_number="s1")
-fails = 0
-
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
 
 
 def raises(name, fn, needle):
@@ -145,5 +139,4 @@ tool_raises("JPEG icon -> ToolError", "Wallet needs PNG", style="generic", icon_
 _wrapped = "data:image/png;base64," + "\n".join(PNG[i:i + 20] for i in range(0, len(PNG), 20))
 check("data: URI + line-wrapped b64 accepted", _ig.decode_b64_png(_wrapped, "x") == _b64.b64decode(PNG))
 
-print(f"\n{'ALL PASSED' if not fails else f'{fails} FAILED'}")
-sys.exit(1 if fails else 0)
+finish()

@@ -1,31 +1,15 @@
 """End-to-end tests for the REST API (POST /api/passes) alongside the MCP tool.
 Starts a real server on a spare port with a throwaway db, never the production one.
 Run: .venv/bin/python tests/test_api.py"""
-import asyncio, os, socket, sqlite3, subprocess, sys, tempfile, time
-from pathlib import Path
+import asyncio, sqlite3
 
 import httpx2 as httpx  # the mcp SDK v2 ships httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-ROOT = Path(__file__).resolve().parent.parent
-fails = 0
+from _harness import Server, check, finish, tempdir
 
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-tmp = tempfile.mkdtemp()
-db_path = Path(tmp) / "test.db"
+db_path = tempdir() / "test.db"
 # a pre-API database, to check the source column is migrated in
 with sqlite3.connect(db_path) as conn:
     conn.execute("""CREATE TABLE requests (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, ip TEXT,
@@ -33,20 +17,9 @@ with sqlite3.connect(db_path) as conn:
                     duration_ms INTEGER, serial_number TEXT)""")
     conn.execute("INSERT INTO requests (ts, ip, style, organization_name, success) VALUES ('2026-01-01T00:00:00', 'x', 'generic', 'Old', 1)")
 
-port = free_port()
-base = f"http://127.0.0.1:{port}"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT="3",
-           WALLET_MCP_PUBLIC_URL=base, WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}")
-proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv = Server({"WALLET_MCP_IP_LIMIT": "3"}, db_path=db_path)
+base = srv.base
 try:
-    for _ in range(100):
-        try:
-            httpx.get(f"{base}/api/stats", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.1)
-
     PASS = {"style": "generic", "organization_name": "API Test", "description": "test", "contact_email": "t@realco.dev", "x402_ready": False,
             "primary_fields": [{"label": "Name", "value": "Ada"}]}
 
@@ -73,6 +46,18 @@ try:
     check("api: pass builder errors are 400s", r.status_code == 400 and "style" in r.json()["error"], r.text)
     r = httpx.get(f"{base}/api/passes")
     check("api: GET not allowed", r.status_code == 405, r.status_code)
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "padding": "A" * (2 * 1024 * 1024)})
+    check("api: a 2 MB body (above nginx's 1 MB) is parsed, not refused for size", r.status_code == 400
+          and r.json()["error"] == "invalid request", r.text[:300])
+    r = httpx.post(f"{base}/api/passes", json={**PASS, "padding": "A" * (3 * 1024 * 1024)})
+    check("api: a body over 3 MB -> 413", r.status_code == 413 and r.json() == {"error": "request body too large"},
+          r.text[:300])
+    r = httpx.patch(f"{base}/api/passes/x", json={"organization_name": "X"})
+    check("api: PATCH without a bearer edit_token -> 401", r.status_code == 401 and r.json() == {
+        "error": "send the pass's edit_token as 'Authorization: Bearer <edit_token>'"}, r.text)
+    r = httpx.patch(f"{base}/api/passes/x", content=b"[]", headers={"authorization": "Bearer t"})
+    check("api: PATCH with a non-object body -> 400",
+          r.status_code == 400 and r.json() == {"error": "request body must be a JSON object"}, r.text)
 
     # 3. the MCP tool still works and is logged as mcp
     async def mcp_call():
@@ -101,11 +86,6 @@ try:
     check("stats: by_source and recent.source present",
           {s["source"] for s in stats["by_source"]} == {"api", "mcp"} and "source" in stats["recent"][0], stats["by_source"])
 finally:
-    proc.terminate()
-    proc.wait()
-    for p in (ROOT / "downloads").glob("*.pkpass"):
-        if time.time() - p.stat().st_mtime < 120:
-            pass  # left for the sweeper; production downloads share this dir, so don't touch them
+    srv.stop()
 
-print(f"\n{fails} failure(s)")
-sys.exit(1 if fails else 0)
+finish()

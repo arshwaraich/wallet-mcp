@@ -13,14 +13,7 @@ for k in ("WALLET_MCP_IP_LIMIT", "WALLET_MCP_EXEMPT_IP_LIMIT"):
     os.environ.pop(k, None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import db  # noqa: E402
-
-failures = 0
-
-
-def check(name, ok, detail=""):
-    global failures
-    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  -- {detail}"))
-    failures += not ok
+from _harness import Server, check, finish  # noqa: E402
 
 
 db.init()
@@ -73,25 +66,12 @@ check("shared egress IP: another email still free", db.check_rate_limit("160.79.
 check("shared egress IP: same email refused on any of the pool", db.check_rate_limit("160.79.106.23", contact_email="first@x.com") is not None)
 
 # End to end through the REST API: the exemption is keyed on the call's contact_email.
-import socket, subprocess, time  # noqa: E402
-import httpx  # noqa: E402
+import httpx2 as httpx  # noqa: E402
 
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-base = f"http://127.0.0.1:{port}"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(tmp / "e2e.db"), WALLET_MCP_IP_LIMIT="1", WALLET_MCP_PUBLIC_URL=base,
-           WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}", WALLET_MCP_DOWNLOADS=str(tmp / "dl"), WALLET_MCP_X402_PAY_TO="")
-root = Path(__file__).resolve().parent.parent
-proc = subprocess.Popen([sys.executable, str(root / "server.py")], env=env, cwd=root,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv = Server({"WALLET_MCP_IP_LIMIT": "1", "WALLET_MCP_EXEMPT_FILE": str(tmp / "exempt.txt"),
+              "WALLET_MCP_X402_PAY_TO": ""}, db_path=tmp / "e2e.db")
+base = srv.base
 try:
-    for _ in range(100):
-        try:
-            httpx.get(f"{base}/api/stats", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.1)
     p = {"style": "generic", "organization_name": "T", "description": "t", "x402_ready": False,
          "primary_fields": [{"label": "Name", "value": "Ada"}]}
     r1 = httpx.post(f"{base}/api/passes", json=p | {"contact_email": "a@realco.dev"})
@@ -110,7 +90,6 @@ try:
     csv_text = httpx.get(f"{base}/api/requests.csv", params={"q": "payer"}).text
     check("csv: header + filtered rows", csv_text.startswith("id,ts,ip") and csv_text.count("payer@x.com") == 1, csv_text)
 finally:
-    proc.terminate()
+    srv.stop()
 
-print(f"\n{failures} failure(s)" if failures else "\nALL PASSED")
-sys.exit(1 if failures else 0)
+finish()

@@ -928,6 +928,50 @@ async def api_requests_csv(request: Request) -> Response:
                     headers={"content-disposition": 'attachment; filename="wallet-mcp-requests.csv"'})
 
 
+# --- REST helpers shared by every JSON route ---
+
+# Base64 images travel in the /api/passes bodies. nginx lets 1 MB through there today; the app's cap sits
+# above that (as on the pilot and batch routes) so it never refuses a request nginx would pass.
+BODY_LIMIT = 3 * 1024 * 1024
+
+
+def _error(message: str, status: int = 400, **extra) -> JSONResponse:
+    return JSONResponse({"error": message, **extra}, status_code=status)
+
+
+async def _json_body(request: Request, limit: int = BODY_LIMIT):
+    """(body dict, None) or (None, error response): a JSON object of at most limit bytes."""
+    raw = await request.body()
+    if len(raw) > limit:
+        return None, _error("request body too large", 413)
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, _error("request body must be a JSON object")
+    if not isinstance(body, dict):
+        return None, _error("request body must be a JSON object")
+    return body, None
+
+
+def _bearer(request: Request) -> str | None:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    return token.strip() if scheme.lower() == "bearer" and token.strip() else None
+
+
+def _reject_unknown(body: dict, allowed) -> JSONResponse | None:
+    unknown = set(body) - set(allowed)
+    return _error(f"unknown field(s): {', '.join(sorted(unknown))}") if unknown else None
+
+
+def _auth_batch(key, batch_id: str | None = None) -> dict | None:
+    """The batch (with its design) for batch_key "<id>.<token>", else None: unknown id, wrong key, a pilot's
+    key, or (given batch_id) a key for another batch all look the same."""
+    if not isinstance(key, str):
+        return None
+    found = pilot.authenticate(batch_id or key.split(".")[0], key)
+    return pilot.with_design(found) if found is not None and found["kind"] == "batch" else None
+
+
 # The REST body accepts exactly the tool's parameters, validated with the same
 # types, so the API and the MCP tool can't drift apart.
 _PassRequest = create_model("PassRequest", __config__=ConfigDict(extra="forbid"), **_tool_fields(create_wallet_pass))
@@ -935,23 +979,20 @@ _PassRequest = create_model("PassRequest", __config__=ConfigDict(extra="forbid")
 
 @server.custom_route("/api/passes", methods=["POST"])
 async def api_create_pass(request: Request) -> Response:
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    body, err = await _json_body(request)
+    if err:
+        return err
     try:
         params = _PassRequest.model_validate(body).model_dump()
     except ValidationError as e:
-        return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
+        return _error("invalid request", details=_validation_details(e))
     try:
         caller = Caller.from_api(request)
         return _api_result(await anyio.to_thread.run_sync(lambda: _create_pass(caller, params), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _api_rejection(e)
     except Exception:
-        return JSONResponse({"error": "internal error building the pass"}, status_code=500)
+        return _error("internal error building the pass", 500)
 
 
 _UpdateRequest = create_model("UpdateRequest", __config__=ConfigDict(extra="forbid"),
@@ -961,28 +1002,24 @@ _UpdateRequest = create_model("UpdateRequest", __config__=ConfigDict(extra="forb
 @server.custom_route("/api/passes/{serial}", methods=["PATCH"])
 async def api_update_pass(request: Request) -> Response:
     """Same as the update_wallet_pass tool; the edit_token goes in "Authorization: Bearer <token>"."""
-    scheme, _, edit_token = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not edit_token:
-        return JSONResponse({"error": "send the pass's edit_token as 'Authorization: Bearer <edit_token>'"},
-                            status_code=401)
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    edit_token = _bearer(request)
+    if not edit_token:
+        return _error("send the pass's edit_token as 'Authorization: Bearer <edit_token>'", 401)
+    body, err = await _json_body(request)
+    if err:
+        return err
     try:
         changes = _UpdateRequest.model_validate(body).model_dump()
     except ValidationError as e:
-        return JSONResponse({"error": "invalid request", "details": _validation_details(e)}, status_code=400)
+        return _error("invalid request", details=_validation_details(e))
     serial, caller = request.path_params["serial"], Caller.from_api(request)
     try:
         return _api_result(await anyio.to_thread.run_sync(
-            lambda: _update_pass(caller, serial, edit_token.strip(), changes), limiter=BUILD_LIMITER))
+            lambda: _update_pass(caller, serial, edit_token, changes), limiter=BUILD_LIMITER))
     except PassRejected as e:
         return _api_rejection(e)
     except Exception:
-        return JSONResponse({"error": "internal error building the pass"}, status_code=500)
+        return _error("internal error building the pass", 500)
 
 
 def _api_result(result: dict) -> JSONResponse:
@@ -993,7 +1030,7 @@ def _api_result(result: dict) -> JSONResponse:
 def _api_rejection(e: PassRejected) -> JSONResponse:
     """x402's HTTP transport: a 402 with the PaymentRequired body, also base64'd in PAYMENT-REQUIRED."""
     if e.payment_required is None:
-        return JSONResponse({"error": e.message}, status_code=e.status)
+        return _error(e.message, e.status)
     return JSONResponse(e.payment_required, status_code=402,
                         headers={"PAYMENT-REQUIRED": payments.encode_header(e.payment_required)})
 
@@ -1114,14 +1151,9 @@ async def download(request: Request) -> Response:
 
 # --- Organizer pilots (pilot.py): REST API behind a secret "<id>.<token>" key; attendee pass links ---
 
-PILOT_BODY_LIMIT = 3 * 1024 * 1024
 PILOT_CSV_LIMIT = 2 * 1024 * 1024
 CLEAN_LIMITER = anyio.CapacityLimiter(2)  # a clean may wait on a model call for up to a minute
 _pilot_locks: dict = {}  # pilot id -> [lock, tasks holding or waiting for it]; dropped once that is 0
-
-
-def _pilot_error(message: str, status: int = 400) -> JSONResponse:
-    return JSONResponse({"error": message}, status_code=status)
 
 
 @contextlib.asynccontextmanager
@@ -1140,29 +1172,15 @@ async def _pilot_lock(pilot_id: str):
             del _pilot_locks[pilot_id]
 
 
-async def _pilot_body(request: Request):
-    """(body dict, None) or (None, error response)."""
-    raw = await request.body()
-    if len(raw) > PILOT_BODY_LIMIT:
-        return None, _pilot_error("request body too large", 413)
-    try:
-        body = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None, _pilot_error("request body must be a JSON object")
-    if not isinstance(body, dict):
-        return None, _pilot_error("request body must be a JSON object")
-    return body, None
-
-
 def _pilot_for(request: Request, key, allow_batch: bool = False):
     """(pilot, None) or (None, error response). Wrong key and unknown id look the same. Paid batches
     share the read-only routes (details, links.csv) but not the free issue/clean/update ones."""
     p = pilot.authenticate(request.path_params["id"], key)
     if p is None:
-        return None, _pilot_error("invalid pilot key", 403)
+        return None, _error("invalid pilot key", 403)
     if p["kind"] == "batch" and not allow_batch:
-        return None, _pilot_error("this is a paid batch: use create_wallet_pass_batch / update_wallet_pass_batch "
-                                  "(REST: /api/batches)", 403)
+        return None, _error("this is a paid batch: use create_wallet_pass_batch / update_wallet_pass_batch "
+                           "(REST: /api/batches)", 403)
     return pilot.with_design(p), None
 
 
@@ -1201,13 +1219,13 @@ async def api_pilot_preview(request: Request) -> Response:
     pilot_id = request.path_params["id"]
     path = _pilot_preview_path(pilot_id)
     if not pilot.ID_RE.match(pilot_id) or not path.is_file():
-        return _pilot_error("no preview", 404)
+        return _error("no preview", 404)
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
 
 
 @server.custom_route("/api/pilot/{id}/clean", methods=["POST"])
 async def api_pilot_clean(request: Request) -> Response:
-    body, err = await _pilot_body(request)
+    body, err = await _json_body(request)
     if err:
         return err
     p, err = _pilot_for(request, body.get("key"))
@@ -1215,9 +1233,9 @@ async def api_pilot_clean(request: Request) -> Response:
         return err
     text = body.get("csv")
     if not isinstance(text, str) or not text.strip():
-        return _pilot_error("csv must be the file's text")
+        return _error("csv must be the file's text")
     if len(text.encode()) > PILOT_CSV_LIMIT:
-        return _pilot_error("csv is larger than 2 MB", 413)
+        return _error("csv is larger than 2 MB", 413)
     result = await anyio.to_thread.run_sync(lambda: csv_clean.clean(text, salt=p["id"]), limiter=CLEAN_LIMITER)
     return JSONResponse(result)
 
@@ -1339,7 +1357,7 @@ async def push_updates(serials: list[str]) -> int:
 
 @server.custom_route("/api/pilot/{id}/issue", methods=["POST"])
 async def api_pilot_issue(request: Request) -> Response:
-    body, err = await _pilot_body(request)
+    body, err = await _json_body(request)
     if err:
         return err
     p, err = _pilot_for(request, body.get("key"))
@@ -1347,11 +1365,11 @@ async def api_pilot_issue(request: Request) -> Response:
         return err
     rows, message = _pilot_rows(body.get("rows"))
     if message:
-        return _pilot_error(message)
+        return _error(message)
     if pilot.expires_epoch(p) <= time.time():
-        return _pilot_error("this event has ended; no more passes can be issued")
+        return _error("this event has ended; no more passes can be issued")
     if not _pilot_disk_ok():
-        return _pilot_error(CAPACITY_ERROR, 503)
+        return _error(CAPACITY_ERROR, 503)
     ip = _client_ip(request)
     unique = _unique_rows(rows)
     async with _pilot_lock(p["id"]):
@@ -1359,19 +1377,19 @@ async def api_pilot_issue(request: Request) -> Response:
         fresh = [t for t in unique if t not in live]
         total = pilot.issued_count(p["id"])
         if total + len(fresh) > p["max_passes"]:
-            return _pilot_error(f"this pilot is limited to {p['max_passes']} passes; {total} are issued and this "
-                                f"request would add {len(fresh)} more")
+            return _error(f"this pilot is limited to {p['max_passes']} passes; {total} are issued and this "
+                         f"request would add {len(fresh)} more")
         results = await issue_rows(p, unique, ip)
         if any(isinstance(r, LowDisk) for r in results.values()):
             logger.error("pilot %s: stopped issuing, less than %d GB of disk free", p["id"],
                          MIN_FREE_DISK_BYTES // 1024 ** 3)
-            return _pilot_error(CAPACITY_ERROR, 503)
+            return _error(CAPACITY_ERROR, 503)
         for ticket, r in results.items():
             if isinstance(r, Exception):
                 who = unique[ticket]["name"]
                 msg = str(r) if isinstance(r, pass_builder.PassBuildError) else "internal error building the pass"
-                return _pilot_error(f"could not build the pass for {who} ({ticket}): {msg}",
-                                    400 if isinstance(r, pass_builder.PassBuildError) else 500)
+                return _error(f"could not build the pass for {who} ({ticket}): {msg}",
+                             400 if isinstance(r, pass_builder.PassBuildError) else 500)
         passes = assemble_passes(rows, results)
         created = sum(1 for x in passes if x["new"])
         return JSONResponse({"passes": passes, "created": created, "reused": len(passes) - created,
@@ -1401,7 +1419,7 @@ async def api_pilot_links(request: Request) -> Response:
 
 @server.custom_route("/api/pilot/{id}/update", methods=["POST"])
 async def api_pilot_update(request: Request) -> Response:
-    body, err = await _pilot_body(request)
+    body, err = await _json_body(request)
     if err:
         return err
     p, err = _pilot_for(request, body.get("key"))
@@ -1410,9 +1428,9 @@ async def api_pilot_update(request: Request) -> Response:
     try:
         changes = pilot.validate_changes(body.get("changes"))
     except ValueError as e:
-        return _pilot_error(str(e))
+        return _error(str(e))
     if not _pilot_disk_ok():
-        return _pilot_error(CAPACITY_ERROR, 503)
+        return _error(CAPACITY_ERROR, 503)
     ip = _client_ip(request)
     async with _pilot_lock(p["id"]):
         merged = pilot.merge_changes(p["design_obj"], changes)
@@ -1421,7 +1439,7 @@ async def api_pilot_update(request: Request) -> Response:
                 lambda: pkpass.build(pilot.fill(merged, pilot.SAMPLE_ROW), str(uuid.uuid4()), None),
                 limiter=BUILD_LIMITER)
         except pass_builder.PassBuildError as e:
-            return _pilot_error(f"that change would not build: {e}")
+            return _error(f"that change would not build: {e}")
         pilot.save_design(p["id"], merged)
         p["design_obj"] = merged
         targets = [{**r, "serial": r["serial"]} for r in pilot.issued_rows(p["id"])]
@@ -1481,10 +1499,9 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
         if design is not None or event_end is not None:
             raise PassRejected("with batch_key, leave out design and event_end: the batch keeps its own "
                                "(change the design with update_wallet_pass_batch)", 400)
-        found = pilot.authenticate(batch_key.split(".")[0], batch_key) if isinstance(batch_key, str) else None
-        if found is None or found["kind"] != "batch":
+        p, new_batch = _auth_batch(batch_key), False
+        if p is None:
             raise PassRejected("unknown batch_key", 404)
-        p, new_batch = pilot.with_design(found), False
         if pilot.expires_epoch(p) <= time.time():
             raise PassRejected("this batch's event has ended; no more passes can be issued", 400)
     else:
@@ -1592,10 +1609,9 @@ async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x4
     build or settlement leaves the passes and the saved design as they were."""
     tool, start = "update_wallet_pass_batch", time.monotonic()
     caller = caller.with_payment_argument(x402_payment)
-    found = pilot.authenticate(batch_key.split(".")[0], batch_key) if isinstance(batch_key, str) else None
-    if found is None or found["kind"] != "batch":
+    p = _auth_batch(batch_key)
+    if p is None:
         raise PassRejected("unknown batch_key", 404)
-    p = pilot.with_design(found)
     style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
     caller = _with_caller_info(caller, contact_email, x402_ready, "update", style, org)
     try:
@@ -1773,21 +1789,17 @@ for _tool in (create_wallet_pass_batch, update_wallet_pass_batch):
 _advertise_caller_info_as_required(create_wallet_pass_batch, update_wallet_pass_batch)
 
 
-async def _batch_api_body(request: Request):
-    body, err = await _pilot_body(request)
-    if err:
-        return None, None, err
-    caller = Caller.from_api(request)
-    return body, caller, None
-
-
 _BATCH_CREATE_KEYS = {"rows", "design", "event_end", "contact_email", "x402_ready", "x402_payment"}
 _BATCH_UPDATE_KEYS = {*pilot.UPDATE_KEYS, "contact_email", "x402_ready", "x402_payment"}
 
 
-def _bearer(request: Request) -> str | None:
-    scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    return token.strip() if scheme.lower() == "bearer" and token.strip() else None
+def _batch_key(request: Request) -> str | None:
+    """The Bearer batch_key, if it is for the batch in the path."""
+    key = _bearer(request)
+    return key if key and key.startswith(request.path_params["id"] + ".") else None
+
+
+_NO_BATCH_KEY = "send the batch_key as 'Authorization: Bearer <batch_key>'"
 
 
 async def _batch_api(run) -> Response:
@@ -1797,33 +1809,29 @@ async def _batch_api(run) -> Response:
         return _api_rejection(e)
     except Exception:
         logger.error("batch API failed: %s", traceback.format_exc())
-        return JSONResponse({"error": "internal error"}, status_code=500)
+        return _error("internal error", 500)
 
 
 @server.custom_route("/api/batches", methods=["POST"])
 async def api_create_batch(request: Request) -> Response:
     """New batch: {design, event_end, rows, contact_email, x402_ready[, x402_payment]}."""
-    body, caller, err = await _batch_api_body(request)
-    if err:
+    body, err = await _json_body(request)
+    if err or (err := _reject_unknown(body, _BATCH_CREATE_KEYS)):
         return err
-    unknown = set(body) - _BATCH_CREATE_KEYS
-    if unknown:
-        return _pilot_error(f"unknown field(s): {', '.join(sorted(unknown))}")
+    caller = Caller.from_api(request)
     return await _batch_api(lambda: _create_batch(caller, batch_key=None, **{k: body.get(k) for k in _BATCH_CREATE_KEYS}))
 
 
 @server.custom_route("/api/batches/{id}/passes", methods=["POST"])
 async def api_add_to_batch(request: Request) -> Response:
     """More attendees: {rows, contact_email, x402_ready[, x402_payment]}, batch_key as Bearer."""
-    key = _bearer(request)
-    if not key or not key.startswith(request.path_params["id"] + "."):
-        return JSONResponse({"error": "send the batch_key as 'Authorization: Bearer <batch_key>'"}, status_code=401)
-    body, caller, err = await _batch_api_body(request)
-    if err:
+    key = _batch_key(request)
+    if not key:
+        return _error(_NO_BATCH_KEY, 401)
+    body, err = await _json_body(request)
+    if err or (err := _reject_unknown(body, _BATCH_CREATE_KEYS - {"design", "event_end"})):
         return err
-    unknown = set(body) - (_BATCH_CREATE_KEYS - {"design", "event_end"})
-    if unknown:
-        return _pilot_error(f"unknown field(s): {', '.join(sorted(unknown))}")
+    caller = Caller.from_api(request)
     return await _batch_api(lambda: _create_batch(caller, batch_key=key, design=None, event_end=None,
                                                   **{k: body.get(k) for k in _BATCH_CREATE_KEYS - {"design", "event_end"}}))
 
@@ -1831,15 +1839,13 @@ async def api_add_to_batch(request: Request) -> Response:
 @server.custom_route("/api/batches/{id}", methods=["PATCH"])
 async def api_update_batch(request: Request) -> Response:
     """Change every pass: {header_fields, ..., change_message, contact_email, x402_ready[, x402_payment]}."""
-    key = _bearer(request)
-    if not key or not key.startswith(request.path_params["id"] + "."):
-        return JSONResponse({"error": "send the batch_key as 'Authorization: Bearer <batch_key>'"}, status_code=401)
-    body, caller, err = await _batch_api_body(request)
-    if err:
+    key = _batch_key(request)
+    if not key:
+        return _error(_NO_BATCH_KEY, 401)
+    body, err = await _json_body(request)
+    if err or (err := _reject_unknown(body, _BATCH_UPDATE_KEYS)):
         return err
-    unknown = set(body) - _BATCH_UPDATE_KEYS
-    if unknown:
-        return _pilot_error(f"unknown field(s): {', '.join(sorted(unknown))}")
+    caller = Caller.from_api(request)
     changes = {k: body[k] for k in pilot.UPDATE_KEYS if k in body}
     return await _batch_api(lambda: _update_batch(caller, batch_key=key, changes=changes,
                                                   contact_email=body.get("contact_email"),
@@ -1851,10 +1857,9 @@ async def api_update_batch(request: Request) -> Response:
 async def api_get_batch(request: Request) -> Response:
     """The batch and every link, batch_key as Bearer (or ?key= for a browser)."""
     key = _bearer(request) or request.query_params.get("key")
-    found = pilot.authenticate(request.path_params["id"], key)
-    if found is None or found["kind"] != "batch":
-        return JSONResponse({"error": "unknown batch or wrong batch_key"}, status_code=404)
-    p = pilot.with_design(found)
+    p = _auth_batch(key, request.path_params["id"])
+    if p is None:
+        return _error("unknown batch or wrong batch_key", 404)
     passes = [{"name": r["name"], "ticket": r["ticket"], "type": r["type"], "email": r["email"],
                "link": pilot.pass_link(r["serial"], r["auth_token"])} for r in pilot.issued_rows(p["id"])]
     return JSONResponse({"batch_id": p["id"], "organization_name": p["org"], "description": p["event_name"],

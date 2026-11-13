@@ -2,31 +2,19 @@
 attendee pass links, bulk updates with APNs push, limits. Real server on a spare port with a throwaway DB and a
 fake APNs and a fake `claude` on PATH, never production.
 Run: .venv/bin/python tests/test_pilot.py"""
-import base64, csv, io, json, os, sqlite3, socket, stat, subprocess, sys, tempfile, threading, time, zipfile
+import base64, csv, io, json, os, sqlite3, stat, subprocess, sys, threading, time, zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 
 import httpx2 as httpx
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parent.parent
+import _harness
+from _harness import ROOT, Server, check, finish, free_port
+
 FIX = ROOT / "tests" / "fixtures"
 sys.path.insert(0, str(ROOT))
-fails = 0
 LIVE_TOKEN = "aa" * 32
 pushes = []
-
-
-def check(name, cond, detail=""):
-    global fails
-    print(("PASS " if cond else "FAIL ") + name + (f"  -- {detail}" if detail and not cond else ""))
-    fails += 0 if cond else 1
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class FakeAPNs(BaseHTTPRequestHandler):
@@ -111,7 +99,9 @@ apns_port = free_port()
 apns = HTTPServer(("127.0.0.1", apns_port), FakeAPNs)
 threading.Thread(target=apns.serve_forever, daemon=True).start()
 
-tmp = Path(tempfile.mkdtemp())
+srv = Server({"WALLET_MCP_IP_LIMIT": "2", "WALLET_MCP_MIN_FREE_DISK_GB": "1",
+              "WALLET_MCP_APNS_URL": f"http://127.0.0.1:{apns_port}"}, start=False)
+tmp, base, db_path = srv.tmp, srv.base, srv.db_path
 bindir = tmp / "bin"
 bindir.mkdir()
 claude_log, claude_mode = tmp / "claude.log", tmp / "claude.mode"
@@ -131,16 +121,9 @@ print("Here is the plan:\\n" + json.dumps({{"header_index": 2, "columns": {{"nam
 """)
 fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
-port = free_port()
-base = f"http://127.0.0.1:{port}"
-db_path = tmp / "test.db"
-env = dict(os.environ, PORT=str(port), WALLET_MCP_DB=str(db_path), WALLET_MCP_IP_LIMIT="2", WALLET_MCP_MIN_FREE_DISK_GB="1",
-           WALLET_MCP_EXEMPT_FILE=str(tmp / "exempt.txt"), WALLET_MCP_DOWNLOADS=str(tmp / "dl"),
-           WALLET_MCP_PREVIEWS=str(tmp / "previews"), WALLET_MCP_PUBLIC_URL=base,
-           WALLET_MCP_PUBLIC_HOST=f"127.0.0.1:{port}", WALLET_MCP_APNS_URL=f"http://127.0.0.1:{apns_port}",
-           PATH=f"{bindir}:{os.environ['PATH']}")
+srv.env["PATH"] = f"{bindir}:{os.environ['PATH']}"
+env = srv.env
 (tmp / "previews").mkdir()
-(tmp / "dl").mkdir()
 
 DESIGN = {
     "style": "eventTicket", "organization_name": "Gala Co", "description": "Gala 2026",
@@ -193,15 +176,8 @@ check("palette repaired at creation", design_stored["background_color"] != "#00f
 check("--keep-colors keeps the brand colours", kept_stored["background_color"] == "#00ff66", kept_stored["background_color"])
 check("default barcode placeholder", design_stored["barcode_message"] == "{ticket}")
 
-proc = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, cwd=ROOT,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv.start()
 try:
-    for _ in range(100):
-        try:
-            httpx.get(f"{base}/api/stats", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.1)
     api = f"{base}/api/pilot/{pid}"
     post = lambda path, body, pid_=pid: httpx.post(f"{base}/api/pilot/{pid_}/{path}", json=body, timeout=120)
 
@@ -399,8 +375,6 @@ try:
             after_n = c.execute("SELECT COUNT(*) FROM pilot_passes WHERE pilot_id = ?", (pid,)).fetchone()[0]
     check("sweep purges pilot_passes rows whose pass is gone", after_n == before_n - 1, (before_n, after_n))
 finally:
-    proc.terminate()
-    proc.wait(timeout=10)
+    srv.stop()
 
-print("FAILED" if fails else "ALL PASSED", fails)
-sys.exit(1 if fails else 0)
+finish(f"{'FAILED' if _harness.fails else 'ALL PASSED'} {_harness.fails}")
