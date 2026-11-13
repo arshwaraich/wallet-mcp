@@ -212,7 +212,7 @@ def check_rate_limit(ip: str, exempt: bool = False, contact_email: str | None = 
         ).fetchone()
         if global_count >= GLOBAL_DAILY_LIMIT:
             return "service is at its daily request limit, try again tomorrow"
-        used = _caller_count(conn, today, ip, contact_email, "success = 1")
+        used = _caller_count(conn, today, ip, contact_email, "success = 1 AND payment_tx IS NULL")
         limit = per_ip_daily_limit(exempt)
         if used >= limit:
             return IP_LIMIT_ERROR.format(limit, "pass" if limit == 1 else "passes", "it" if limit == 1 else "them")
@@ -237,7 +237,7 @@ def public_stats() -> dict:
 def free_remaining(ip: str, contact_email: str | None = None) -> int:
     """Free passes this caller has left today (same keying as check_rate_limit)."""
     with _conn() as conn:
-        used = _caller_count(conn, _today_start(), ip, contact_email, "success = 1")
+        used = _caller_count(conn, _today_start(), ip, contact_email, "success = 1 AND payment_tx IS NULL")
     return per_ip_daily_limit(is_exempt(contact_email)) - used
 
 
