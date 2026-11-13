@@ -239,11 +239,14 @@ def live_tickets(pilot_id: str) -> set:
             "WHERE pp.pilot_id = ? AND p.expires > ?", (pilot_id, int(time.time())))}
 
 
-def issued_rows(pilot_id: str) -> list[dict]:
+def issued_rows(pilot_id: str, live: bool = False) -> list[dict]:
+    """Issued attendee rows with their pass's serial and auth_token. live=True: only passes still inside
+    their update window (expired ones count as gone before the sweep deletes them)."""
     with db._lock, db._conn() as conn:
-        rows = conn.execute("""SELECT pp.name, pp.email, pp.ticket, pp.type, pp.serial, p.auth_token
-                               FROM pilot_passes pp JOIN passes p ON p.serial = pp.serial
-                               WHERE pp.pilot_id = ? ORDER BY pp.rowid""", (pilot_id,)).fetchall()
+        rows = conn.execute(f"""SELECT pp.name, pp.email, pp.ticket, pp.type, pp.serial, p.auth_token
+                                FROM pilot_passes pp JOIN passes p ON p.serial = pp.serial
+                                WHERE pp.pilot_id = ? {"AND p.expires > ?" if live else ""} ORDER BY pp.rowid""",
+                            (pilot_id, int(time.time())) if live else (pilot_id,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -329,8 +332,11 @@ def save_design(pilot_id: str, design: dict) -> None:
         conn.execute("UPDATE pilots SET design = ? WHERE id = ?", (json.dumps(design), pilot_id))
 
 
-def rebuild_one(pilot: dict, row: dict, ip: str) -> bool:
-    """Rebuild one attendee pass from pilot['design_obj']. True if replaced."""
+def rebuild_one(pilot: dict, row: dict, ip: str, logged: bool = True, stage: str | None = None) -> bool:
+    """Rebuild one attendee pass from pilot['design_obj']. True if rebuilt, False if the pass is gone.
+    Synchronous: run it in a worker thread. logged=False leaves logging to the caller (paid batches log
+    once the payment has settled). With stage, the new version goes into db.pass_staging under that id
+    instead of replacing the stored pass (db.swap_stage puts it live)."""
     started = time.monotonic()
     stored = db.get_pass(row["serial"])
     if stored is None:
@@ -338,11 +344,16 @@ def rebuild_one(pilot: dict, row: dict, ip: str) -> bool:
     try:
         params = fill(pilot["design_obj"], row)
         pkpass = _build(params, row["serial"], stored["auth_token"])
-        db.replace_pass(row["serial"], json.dumps(params), pkpass, max(int(time.time()), stored["updated"] + 1))
+        if stage:
+            db.stage_pass(stage, row["serial"], json.dumps(params), pkpass)
+        else:
+            db.replace_pass(row["serial"], json.dumps(params), pkpass, max(int(time.time()), stored["updated"] + 1))
     except Exception as e:
-        log(pilot, ip, success=False, error=str(e)[:300], started=started, serial=row["serial"], action="update")
+        if logged:
+            log(pilot, ip, success=False, error=str(e)[:300], started=started, serial=row["serial"], action="update")
         raise
-    log(pilot, ip, success=True, error=None, started=started, serial=row["serial"], action="update")
+    if logged:
+        log(pilot, ip, success=True, error=None, started=started, serial=row["serial"], action="update")
     return True
 
 
