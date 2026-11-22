@@ -75,7 +75,7 @@ Wallet in iOS 27 can scan a card or fill in a Standard, Membership or Event temp
 
 ## Privacy, terms and support
 
-walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus the contact email and x402 status every call must send. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Card payments go through Dodo Payments (merchant of record); unused credits are refundable within 30 days of purchase. Full terms, refunds and privacy: [walletmcppass.com/#terms](https://walletmcppass.com/#terms). Support and refunds: support@walletmcppass.com; bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus the contact email and x402 status every call must send. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Card payments go through Dodo Payments (merchant of record); unused credits are refundable within 30 days of purchase. Full terms, refunds and privacy: [walletmcppass.com/terms](https://walletmcppass.com/terms). Support and refunds: support@walletmcppass.com; bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
 
 ## Why this exists
 
