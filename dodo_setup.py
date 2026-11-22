@@ -26,7 +26,9 @@ def api(method, path, **kw):
 
 
 def items(page):
-    return page.get("items", page) if isinstance(page, dict) else page
+    if isinstance(page, dict):
+        return page.get("items", page.get("data", []))
+    return page
 
 
 def log(msg):
