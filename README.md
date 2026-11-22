@@ -1,13 +1,13 @@
 # wallet-mcp: Apple Wallet pass generator for Claude, ChatGPT and any MCP client
 
-Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wallet pass (`.pkpass`) from an AI assistant, with no Apple Developer account. wallet-mcp is the open-source server behind [walletmcppass.com](https://walletmcppass.com): an MCP server with two tools, `create_wallet_pass` and `update_wallet_pass`, and the same pass builder as a REST API.
+Turn a PDF boarding pass, ticket, coupon or loyalty card into a signed Apple Wallet pass (`.pkpass`) from an AI assistant, with no Apple Developer account. wallet-mcp is the open-source server behind [walletmcppass.com](https://walletmcppass.com): an MCP server with `create_wallet_pass` and `update_wallet_pass` (plus `buy_pass_credits` / `check_pass_credits` for paying by card), and the same pass builder as a REST API.
 
 | | |
 |---|---|
 | MCP endpoint | `https://walletmcppass.com/mcp` (Streamable HTTP) |
 | REST API | `POST https://walletmcppass.com/api/passes`, `PATCH .../api/passes/{serial}` |
 | Sign-in | None. No account or API key, just a contact email on each call |
-| Price | The first 10 successful calls (creates or updates) each day per caller (IP address or `contact_email`) are free; failed calls don't count; every call after them is $0.01 in USDC on Base, paid with [x402](#paying-with-x402) |
+| Price | The first 2 successful calls (creates or updates) each day per caller (IP address or `contact_email`) are free; failed calls don't count; every call after them is $0.01, paid [by card](#paying-by-card-pass-credits-dodo-payments) with prepaid packs ($1 = 100 passes, via Dodo Payments) or, from a crypto wallet, with [x402](#alternative-paying-with-x402) (USDC on Base) |
 | Limits | 500 free calls a day in total; paid: 1,000 a day per IP, 10,000 in total; passes up to 10 MB |
 | Pass types | Boarding pass, event ticket, coupon, store card, generic (+ iOS 27 poster layout) |
 | Works with | Claude, ChatGPT, Codex, the OpenAI Responses API, Claude Code, any Streamable HTTP MCP client |
@@ -157,7 +157,7 @@ curl https://walletmcppass.com/api/passes \
 |---|---|
 | 200 | Same as the tool: `{ download_url, expires_in_seconds, serial_number, pass_type_identifier }` |
 | 400 | `{"error": "invalid request", "details": [...]}` for a malformed body or wrong types; `{"error": "..."}` when the pass itself is invalid |
-| 402 | Past a free limit (per-IP or global): an x402 `PaymentRequired` body (also base64'd in the `PAYMENT-REQUIRED` header). Retry with a payment, see [below](#paying-with-x402) |
+| 402 | Past a free limit (per-IP or global): the `error` says how to pay by card (`POST /api/credits`, then retry with `credit_key`), and the body is an x402 `PaymentRequired` (also base64'd in the `PAYMENT-REQUIRED` header) for paying with x402 instead. See [Paying by card](#paying-by-card-pass-credits-dodo-payments) |
 | 413 | `{"error": "request body too large"}` above 3 MB (base64 images count; a proxy may cap lower, nginx's default is 1 MB) |
 | 429 | `{"error": "rate limit exceeded: ..."}` or `"service is at its daily request limit ..."` — only when payments are off |
 | 500 | `{"error": "internal error building the pass"}` |
@@ -221,10 +221,30 @@ You need your own Apple Developer **Pass Type ID certificate** — the one in th
 
 ## Rate limiting
 
-No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 1 free successful call/day per caller (`WALLET_MCP_IP_LIMIT`; every call after it is paid; failed calls and refusals don't count, but a caller is cut off with a 429, paid or not, after 20 failed calls a day, `WALLET_MCP_FAIL_LIMIT`), where a caller is out of free calls once either its IP or its `contact_email` has used them, so switching one doesn't reset it; on shared proxy egress ranges (claude.ai connectors in 160.79.104.0/21, Cloudflare; `WALLET_MCP_SHARED_EGRESS`, space-separated CIDRs) only the email counts, since many users share those IPs and one user hops between them, 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). **Exemptions:** a caller whose `contact_email` is listed in `data/free_exempt.txt` (one address per line, optionally followed by `until=YYYY-MM-DD` to end the exemption from 00:00 UTC that day, `#` comments, case-insensitive, read on every call so no restart is needed; `WALLET_MCP_EXEMPT_FILE` moves it) keeps the older free limit of 30 calls/day, 20 from 2026-11-18 (`IP_LIMIT_DROP_DAY`; `WALLET_MCP_EXEMPT_IP_LIMIT` pins it). The file is under the gitignored `data/`, so the list isn't published. If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
+No API key — anyone with the URL can call the tool or the REST API. Protected only by daily caps in `db.py`: 2 free successful calls/day per caller (`WALLET_MCP_IP_LIMIT`; every call after them is paid; failed calls and refusals don't count, but a caller is cut off with a 429, paid or not, after 20 failed calls a day, `WALLET_MCP_FAIL_LIMIT`), where a caller is out of free calls once either its IP or its `contact_email` has used them, so switching one doesn't reset it; on shared proxy egress ranges (claude.ai connectors in 160.79.104.0/21, Cloudflare; `WALLET_MCP_SHARED_EGRESS`, space-separated CIDRs) only the email counts, since many users share those IPs and one user hops between them, 500 free calls/day globally as a backstop (paid calls excluded), counted across MCP and REST calls combined (override with `WALLET_MCP_IP_LIMIT` / `WALLET_MCP_GLOBAL_LIMIT`; `WALLET_MCP_DB` moves the sqlite file, which the tests use). **Exemptions:** a caller whose `contact_email` is listed in `data/free_exempt.txt` (one address per line, optionally followed by `until=YYYY-MM-DD` to end the exemption from 00:00 UTC that day, `#` comments, case-insensitive, read on every call so no restart is needed; `WALLET_MCP_EXEMPT_FILE` moves it) keeps the older free limit of 30 calls/day, 20 from 2026-11-18 (`IP_LIMIT_DROP_DAY`; `WALLET_MCP_EXEMPT_IP_LIMIT` pins it). The file is under the gitignored `data/`, so the list isn't published. If you put this behind a hosted MCP client (e.g. a claude.ai connector) rather than direct calls, be aware many end users can share one apparent IP on the server side, so the per-caller cap won't isolate them individually — the global cap is what actually protects you in that case.
 
-## Paying with x402
+## Paying by card: pass credits (Dodo Payments)
 
+The main way to pay, through Dodo Payments (merchant of record). Dodo's smallest card charge is $0.50, so cards buy
+prepaid packs instead of paying per call: `"100"` (100 passes, $1), `"500"` ($5) or `"2000"` ($20), the same $0.01 a pass.
+
+1. `buy_pass_credits(pack, contact_email[, credit_key])` (REST `POST /api/credits`) returns a Dodo `checkout_url`
+   for the user to pay, plus a secret `credit_key` (`wpc_...`, shown once; send `credit_key` to top up instead).
+2. Dodo calls `POST /api/dodo/webhook` (Standard Webhooks signature, `DODO_PAYMENTS_WEBHOOK_KEY`); the payment
+   is re-read from Dodo's API, then the pack is added to the key once (replays are ignored). `refund.succeeded`
+   and `dispute.opened` take the pack back.
+3. Any paid call (past the free passes) that sends `credit_key` spends 1 credit per pass, only after the work is
+   built (as with an x402 settlement). Paid refusals offer the card option first, x402 second.
+   `check_pass_credits(credit_key)` / `GET /api/credits` (Bearer) shows the balance.
+
+Only a sha256 of each key is stored. Config (`/etc/wallet-mcp/dodo.env`, root-only, loaded by the unit's
+`dodo.conf` drop-in): `DODO_PAYMENTS_API_KEY` plus the lines `dodo_setup.py` writes (`DODO_PRODUCT_100/500/2000`,
+`DODO_PAYMENTS_WEBHOOK_KEY`). All four must be set or card credits stay off. nginx: `deploy/nginx-credits.conf`.
+Tests: `tests/test_credits.py` (fake Dodo API).
+
+## Alternative: paying with x402
+
+For agents that have a crypto wallet. 
 Both tools and the REST API also require two inputs that are only logged, as `requests` columns: `contact_email` (the user's address, so the operator can reach them about the service; a missing, malformed or placeholder one is a 400 that is logged as refused but doesn't count as a call) and `x402_ready` (true, false or `"unknown"`, which shows how many clients could pay after their free first call; separate from the `x402` column, which records whether a call actually sent a payment).
 
 Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free limit (per-IP or global) is offered the call for $0.01 in USDC instead of being refused. Paid calls don't count towards the global free budget. They have their own caps: 1,000 a day per IP and 10,000 in total (`WALLET_MCP_PAID_IP_LIMIT` / `WALLET_MCP_PAID_GLOBAL_LIMIT`), past which it's a plain 429. Without it, they get the plain 429 as before. `payments.py` uses the [x402](https://www.x402.org) SDK:
@@ -232,7 +252,7 @@ Set `WALLET_MCP_X402_PAY_TO` to a Base address and a caller past either free lim
 - **MCP**: the refused call is a tool error whose `structuredContent` is an x402 v2 `PaymentRequired` (resource `mcp://tool/create_wallet_pass` or `update_wallet_pass`). The client retries the same call with the signed payment in the `x402_payment` argument (a `PaymentPayload` object or its base64) or in `_meta["x402/payment"]`. The argument exists for chat apps such as Claude.ai and ChatGPT: there the model fills in tool arguments but can't set `_meta`, so a payment signed by a wallet connector can only reach the server as an argument. If both are sent, `_meta` wins. The result then carries the receipt in `_meta["x402/payment-response"]` and as a `payment` key.
 - **REST**: a 402 with the `PaymentRequired` body and `PAYMENT-REQUIRED` header. The client retries with a `PAYMENT-SIGNATURE` (or legacy `X-PAYMENT`) header, or an `x402_payment` field in the JSON body, and gets the receipt in `PAYMENT-RESPONSE` and as `payment`.
 
-The facilitator verifies the payment before any work. It settles it on-chain after the pass is built but before the pass is handed over, stored or pushed. So a failed build is never charged, and a failed settlement (402 again) gets nothing and changes nothing. Payments sent while under the limit are ignored, not charged. Each settled call is logged with its `payment_tx`. The server never holds a key; the USDC goes straight to the payout address. If the facilitator can't be reached to quote a price, single passes and batches alike get a 503 (try again later), and the refusal is logged.
+The facilitator verifies the payment before any work. It settles it on-chain after the pass is built but before the pass is handed over, stored or pushed. So a failed build is never charged, and a failed settlement (402 again) gets nothing and changes nothing. Payments sent while under the limit are ignored, not charged. Each settled call is logged with its `payment_tx`. The server never holds a key; the USDC goes straight to the payout address. If the facilitator can't be reached to quote a price, the call gets a 503 (try again later), and the refusal is logged.
 
 | Env var | Default |
 |---|---|
@@ -242,25 +262,6 @@ The facilitator verifies the payment before any work. It settles it on-chain aft
 | `WALLET_MCP_X402_PRICE` | `$0.01` |
 
 Coinbase's CDP facilitator also needs CDP API-key auth headers, which aren't wired in. `tests/test_x402.py` runs against a fake facilitator. `--live` also sends an unfunded payment to PayAI on mainnet, which must be refused for lack of balance.
-
-## Paying by card: pass credits (Dodo Payments)
-
-For users without an x402 wallet. Dodo's smallest card charge is $0.50, so cards buy prepaid packs instead of
-paying per call: `"100"` (100 passes, $1), `"500"` ($5) or `"2000"` ($20), the same $0.01 a pass.
-
-1. `buy_pass_credits(pack, contact_email[, credit_key])` (REST `POST /api/credits`) returns a Dodo `checkout_url`
-   for the user to pay, plus a secret `credit_key` (`wpc_...`, shown once; send `credit_key` to top up instead).
-2. Dodo calls `POST /api/dodo/webhook` (Standard Webhooks signature, `DODO_PAYMENTS_WEBHOOK_KEY`); the payment
-   is re-read from Dodo's API, then the pack is added to the key once (replays are ignored). `refund.succeeded`
-   and `dispute.opened` take the pack back.
-3. Any paid call (past the free passes, or a batch) that sends `credit_key` spends 1 credit per pass, only after
-   the work is built (as with an x402 settlement). Paid refusals now offer both x402 and the card option.
-   `check_pass_credits(credit_key)` / `GET /api/credits` (Bearer) shows the balance.
-
-Only a sha256 of each key is stored. Config (`/etc/wallet-mcp/dodo.env`, root-only, loaded by the unit's
-`dodo.conf` drop-in): `DODO_PAYMENTS_API_KEY` plus the lines `dodo_setup.py` writes (`DODO_PRODUCT_100/500/2000`,
-`DODO_PAYMENTS_WEBHOOK_KEY`). All four must be set or card credits stay off. nginx: `deploy/nginx-credits.conf`.
-Tests: `tests/test_credits.py` (fake Dodo API).
 
 ## Organizer pilots
 
@@ -278,19 +279,6 @@ A free pilot for event organizers: one design, one updatable pass per attendee, 
 - Attendee passes live in the normal `passes` table (expiry = event end + 7 days), so the PassKit web service and APNs push work as for any updatable pass. Pilot calls are logged with `source='pilot'`, `client='pilot:<id>'` and never count against the public free limits.
 - `clean` finds the header by heuristic; only if unsure it asks `claude -p --model haiku` (first 25 rows, mapping plan only; code applies it to every row). Needs `claude` on the service's PATH, otherwise it silently falls back to the heuristic.
 - Tests: `.venv/bin/python tests/test_pilot.py` (set `WALLET_MCP_MIN_FREE_DISK_GB=1` is done by the test itself).
-
-## Bulk passes (paid batches): `create_wallet_pass_batch` / `POST /api/batches`
-
-The organizer bulk upload, open to any caller and paid: one design (create_wallet_pass's parameters, strings may use `{name} {ticket} {type} {email}`) plus attendee rows `{name, ticket, type?, email?}` gives one permanent, updatable link per attendee (`/pass/{serial}/{auth_token}`, live until `event_end` + 7 days). **No free tier:** every new pass costs `WALLET_MCP_X402_PRICE` ($0.01), and a batch update costs that per pass in the batch, each paid as ONE x402 payment for the whole call (the 402 quotes the exact total). Nothing is charged unless every pass builds; a failed settlement rolls the new passes (and a new batch) back. Re-sending a ticket already in the batch is free and returns the same link.
-
-| MCP tool | REST | |
-|---|---|---|
-| `create_wallet_pass_batch(design, event_end, rows, ...)` | `POST /api/batches` | new batch; returns `batch_key` once |
-| `create_wallet_pass_batch(batch_key, rows, ...)` | `POST /api/batches/{id}/passes` + `Authorization: Bearer <batch_key>` | more attendees |
-| `update_wallet_pass_batch(batch_key, header_fields..., change_message, ...)` | `PATCH /api/batches/{id}` + Bearer | re-sign every pass + APNs push |
-| | `GET /api/batches/{id}` + Bearer (or `?key=`) | all links; `links_csv_url` also works |
-
-All take `contact_email` + `x402_ready` (required) and `x402_payment` (or `_meta["x402/payment"]` / `PAYMENT-SIGNATURE`). Limits: <=1000 rows per call, `WALLET_MCP_BATCH_MAX_PASSES` (5000) per batch, `event_end` within 366 days, and the paid daily caps count passes, not calls. Builds run 2 at a time per call (~20 ms each). Batches are pilots with `kind='batch'`; the free `/api/pilot/{id}/issue|clean|update` routes refuse them. Each pass is logged as its own `requests` row carrying the shared `payment_tx`, so revenue (rows x $0.01) stays right. Tests: `.venv/bin/python tests/test_batch.py`. Nginx block: `deploy/nginx-batches.conf`.
 
 ## Capacity guards
 

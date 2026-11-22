@@ -17,7 +17,8 @@ _lock = threading.Lock()
 
 # Free successful calls a day per caller (IP or contact_email); every call after them is paid.
 # Was 1 from 2026-11-08 to 2026-11-10: usage fell ~75% and nobody paid, so it went back up to 10.
-PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 10))
+# 2 since 2026-11-22 (user decision), now that card payments (credits.py) are live next to x402.
+PER_IP_DAILY_LIMIT = int(os.environ.get("WALLET_MCP_IP_LIMIT", 2))
 # Exempt callers (contact_email listed in EXEMPT_FILE, one per line, not in git) keep the old free
 # limit: 30 a day, dropping to 20 on IP_LIMIT_DROP_DAY (UTC). WALLET_MCP_EXEMPT_IP_LIMIT pins it.
 EXEMPT_FILE = Path(os.environ.get("WALLET_MCP_EXEMPT_FILE", DB_PATH.parent / "free_exempt.txt"))

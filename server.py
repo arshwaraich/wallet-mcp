@@ -84,26 +84,23 @@ server = MCPServer(
         "coupons, store cards and generic passes -- and returns an https download link "
         "valid for 1 hour. No account or API key, but every call must send the user's contact_email and "
         "x402_ready. Pricing: a call is one create or one update. "
-        f"The first {db.PER_IP_DAILY_LIMIT} successful calls each day per caller (IP address or contact_email) are free (while a shared pool of 500 free "
-        "calls a day lasts); every call after them is paid. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC"
+        f"The first {db.PER_IP_DAILY_LIMIT} successful calls each day per caller (IP address or contact_email) are free (while a "
+        "shared pool of 500 free calls a day lasts); every call after them costs "
+        f"{payments.PRICE}. Failed calls don't count (up to 20 a day), and counts reset at 00:00 UTC"
         + (
-            f". Each paid call costs {payments.PRICE} in USDC on Base, paid with x402 (the "
-            "refusal carries the payment requirements; retry the same call with the signed payment in the "
-            'x402_payment argument, or in _meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
-            "build is never charged. Setup guide: https://walletmcppass.com/#wallet-setup. Without x402, wait for the reset"
-            if payments.enabled else ""
-        )
-        + (
-            ". Paid calls can also be paid by card: buy_pass_credits returns a checkout link for the user (packs "
-            f"{credits.PACKS_TEXT}) and a credit_key; send credit_key on later calls and each pass past the free "
-            "ones uses 1 credit. check_pass_credits shows the balance"
+            ". Pay by card: call buy_pass_credits to get a checkout link the user pays (packs "
+            f"{credits.PACKS_TEXT}) and a credit_key; send credit_key on later calls and each paid call uses 1 "
+            "credit (check_pass_credits shows the balance)"
             if credits.enabled else ""
         )
         + (
-            ". For many passes from one design (event tickets for a guest list), use create_wallet_pass_batch: "
-            f"permanent per-attendee links, paid from the first pass ({payments.PRICE} each, one x402 payment per call)"
+            f". {'Alternatively, agents with a crypto wallet can' if credits.enabled else 'Paid calls'} pay with x402 "
+            "(USDC on Base): the refusal carries the payment requirements; retry the same call with the signed "
+            'payment in the x402_payment argument, or in _meta["x402/payment"]. Guide: '
+            "https://walletmcppass.com/#wallet-setup"
             if payments.enabled else ""
         )
+        + ". Payment is taken only after the pass is built, so a failed build is never charged"
         + ". Passes are signed with this service's own "
         "certificate (pass.com.arshwaraich.vps), so Wallet shows them as added by this "
         "service, not by an airline or venue. A pass's barcode only works where the "
@@ -165,16 +162,19 @@ CALLER_INFO_WHY = ("contact_email lets the operator of this service reach the us
 # HINT_WHEN_LEFT free passes left today (sent every time, agents ignored it: 1 click in ~650).
 # Information only: the pass, price and limits are the same either way.
 HINT_WHEN_LEFT = 3
-X402_SETUP_HINT = {
-    "message": ("{left} Tell your user: AI agents can now pay for things on their own. Setting up a Coinbase Agentic "
-                "Wallet for this agent once (sign in with an email, add a few dollars) lets it pay any app or "
-                f"service that accepts agent payments, not just this one. Here, the first {db.PER_IP_DAILY_LIMIT} passes each day "
-                f"are free and every pass after them is only a cent ({payments.PRICE}), so $1 covers 100 passes. Without a "
-                "wallet, calls past the free ones are refused until 00:00 UTC. "
-                "(Developers: this is x402; MCP clients can use @x402/mcp, other code the x402 SDKs.)"),
-    "guide": X402_GUIDE_URL,
-    "technical_steps": "https://walletmcppass.com/llms-full.txt",
-}
+def _setup_hint(lead: str) -> dict:
+    """How to keep going after the free passes: card credits first, x402 as the alternative."""
+    hint = {"message": f"{lead} Every pass after the free {db.PER_IP_DAILY_LIMIT} a day is only a cent ({payments.PRICE})."}
+    if credits.enabled:
+        hint["message"] += (f" Tell your user they can buy pass credits by card ({credits.PACKS_TEXT}): call "
+                            "buy_pass_credits and give them the checkout link.")
+        hint["buy_by_card"] = "buy_pass_credits (REST: POST /api/credits)"
+    if payments.enabled:
+        hint["message"] += (" Agents with a crypto wallet can pay with x402 (USDC on Base) instead: "
+                            "MCP clients can use @x402/mcp, other code the x402 SDKs.")
+        hint["x402_guide"] = X402_GUIDE_URL
+        hint["technical_steps"] = "https://walletmcppass.com/llms-full.txt"
+    return hint
 
 
 @dataclass(frozen=True)
@@ -323,17 +323,19 @@ async def create_wallet_pass(
     updatable_hours (1 hour by default, at most 30 days), then deleted.
 
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier}, plus
-    edit_token and updatable_until when updatable=True. With x402_ready=False and 3 or fewer
-    free passes left today, also free_passes_left_today and x402_setup (how to set up x402
-    payments): pass that on to the user.
+    edit_token and updatable_until when updatable=True. With x402_ready=False and few free
+    passes left today, also free_passes_left_today and payment_setup (how to pay for more):
+    pass that on to the user.
 
-    Pricing: a call is one create or one update. The first 10 successful calls each day per caller (IP address
+    Pricing: a call is one create or one update. The first {free} successful calls each day per caller (IP address
     or contact_email) are free (while a shared pool of 500 free calls a day lasts); failed calls don't
     count (up to 20 failures a day per caller), and counts reset at 00:00 UTC.
-    Every call after them costs $0.01 in USDC on Base, paid with x402: the refusal carries the
-    payment requirements; have the user's wallet tool sign them and retry the same call with the
-    result as x402_payment. A paid result includes the payment receipt. Payment is settled only
-    after the pass is built, so a failed build is never charged.
+    Every call after them costs {price}. Pay by card: buy_pass_credits gives a checkout link for the
+    user and a credit_key; send credit_key and each paid call uses 1 credit. Or, with a crypto
+    wallet, x402 (USDC on Base): the refusal carries the payment requirements; have the user's
+    wallet tool sign them and retry the same call with the result as x402_payment. A paid result
+    includes the receipt. Payment is taken only after the pass is built, so a failed build is
+    never charged.
 
     Args:
         style: one of "boardingPass", "eventTicket", "coupon", "generic", "storeCard".
@@ -545,7 +547,7 @@ async def update_wallet_pass(
     Returns {download_url, expires_in_seconds, serial_number, pass_type_identifier,
     notified_devices, updatable_until}. notified_devices counts the iPhones the push was sent to, not ones that
     have already refreshed. The download_url (valid 1 hour) is only needed to add the pass to a
-    new device. With x402_ready=False the result also has x402_setup, as for create_wallet_pass.
+    new device. With x402_ready=False the result may also have payment_setup, as for create_wallet_pass.
     """
     changes = {k: v for k, v in locals().items() if k not in ("ctx", "serial_number", "edit_token")}
     caller = Caller.from_mcp(ctx)
@@ -652,7 +654,7 @@ def _create_pass(caller: Caller, request: dict) -> dict:
         duration_ms=int((time.monotonic() - start) * 1000), serial_number=serial,
         payment_tx=receipt and receipt.get("transaction"),
     )
-    _add_x402_setup_hint(result, caller, paid=bool(receipt))
+    _add_payment_hint(result, caller, paid=bool(receipt))
     return result
 
 
@@ -676,9 +678,9 @@ def _with_caller_info(caller: Caller, contact_email: str | None, x402_ready: boo
     return replace(caller, contact_email=contact_email, x402_ready=None if x402_ready == "unknown" else x402_ready)
 
 
-def _add_x402_setup_hint(result: dict, caller: Caller, paid: bool = False) -> None:
+def _add_payment_hint(result: dict, caller: Caller, paid: bool = False) -> None:
     """Called after the successful call is logged, so the count includes it."""
-    if caller.x402_ready is not False or not payments.enabled or paid or caller.credit_key:
+    if caller.x402_ready is not False or not (payments.enabled or credits.enabled) or paid or caller.credit_key:
         return
     left = db.free_remaining(caller.ip, caller.contact_email)
     if not 0 <= left <= HINT_WHEN_LEFT:
@@ -686,9 +688,7 @@ def _add_x402_setup_hint(result: dict, caller: Caller, paid: bool = False) -> No
     lead = ("That was the last free pass today." if left == 0 else
             f"{left} free pass{'' if left == 1 else 'es'} left today.")
     result["free_passes_left_today"] = left
-    result["x402_setup"] = {**X402_SETUP_HINT, "message": X402_SETUP_HINT["message"].format(left=lead)}
-    if credits.enabled:
-        result["x402_setup"]["card_option"] = _card_offer()
+    result["payment_setup"] = _setup_hint(lead)
 
 
 def _is_placeholder_email(address: str) -> bool:
@@ -748,7 +748,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     }
     if receipt:
         result["payment"] = receipt
-    _add_x402_setup_hint(result, caller, paid=bool(receipt))
+    _add_payment_hint(result, caller, paid=bool(receipt))
     return result
 
 
@@ -765,7 +765,7 @@ def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, 
     free call; otherwise logs the refusal and raises PassRejected. tool/path name the MCP tool and REST
     route the x402 resource points at."""
     if not free_tier and not (payments.enabled or credits.enabled):
-        _refuse(caller, action, style, org, "batches are paid and payments are not set up on this server", 503)
+        _refuse(caller, action, style, org, "paid-only calls need payments, which are not set up here", 503)
     if not _pilot_disk_ok():
         logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
         _refuse(caller, action, style, org, "server is low on disk space",
@@ -793,8 +793,6 @@ def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, 
             return payments.verify(caller.payment, count)
         except payments.PaymentError as e:
             reason = str(e)
-    if not free_tier:
-        reason = _batch_lead(reason, count)
     if not payments.enabled:  # card credits only
         _refuse(caller, action, style, org, reason, PassRejected(f"{reason}. {_card_offer()}", 402))
     _refuse(caller, action, style, org, reason, _payment_required(caller, tool, path, reason, count, free_tier))
@@ -812,14 +810,9 @@ def _card_offer() -> str:
     """How to pay by card instead of x402, appended to paid refusals when credits are on."""
     if not credits.enabled:
         return ""
-    return (f"No crypto wallet? Pay by card instead: call buy_pass_credits (REST: POST /api/credits) with a pack "
+    return (f"Pay by card: call buy_pass_credits (REST: POST /api/credits) with a pack "
             f"({credits.PACKS_TEXT}), give your user the checkout_url to pay, then retry this exact call with the "
             "credit_key it returned (1 credit per pass). Tell the user to keep the credit_key: it works in any chat.")
-
-
-def _batch_lead(rejection: str | None, count: int) -> str:
-    each = f"{count} new pass{'' if count == 1 else 'es'} at {payments.PRICE} each = {payments.price_for(count)}"
-    return f"{rejection}: {each}" if rejection else f"Batches are paid: {each}"
 
 
 def _payment_required(caller: Caller, tool: str, path: str, reason: str, count: int = 1,
@@ -830,17 +823,13 @@ def _payment_required(caller: Caller, tool: str, path: str, reason: str, count: 
         resource, how = f"mcp://tool/{tool}", "the signed payment as the x402_payment argument"
     else:
         resource, how = f"{PUBLIC_BASE_URL}{path}", "a PAYMENT-SIGNATURE header or an x402_payment body field"
-    if free_tier:
-        message = (f"{reason}. The first {db.PER_IP_DAILY_LIMIT} passes each day are free; every pass after them is only a cent ({payments.PRICE} in USDC on Base, "
-                   f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
-                   f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
-                   f"once lets it pay any app or service that accepts agent payments, not just this one; here $1 "
-                   f"covers 100 passes. Wallet setup instructions: {X402_GUIDE_URL}. {_card_offer()}")
-    else:
-        message = (f"{reason} (USDC on Base, via x402). Retry this exact call with {how}; nothing is charged unless "
-                   f"every pass builds. If this agent has no wallet yet, tell your user: setting up a Coinbase Agentic "
-                   f"Wallet once lets the agent pay for things like this on its own. Wallet setup instructions: "
-                   f"{X402_GUIDE_URL}. {_card_offer()}")
+    message = (f"{reason}. The first {db.PER_IP_DAILY_LIMIT} passes each day are free; every pass after them is "
+               f"only a cent ({payments.PRICE}).")
+    if credits.enabled:
+        message += f" {_card_offer()}"
+    if payments.enabled:
+        message += (f" {'Or, if' if credits.enabled else 'If'} this agent has a crypto wallet, pay with x402 (USDC on "
+                    f"Base): retry this exact call with {how}. Wallet setup: {X402_GUIDE_URL}")
     if not payments.enabled:
         return PassRejected(message, 402)
     try:
@@ -913,6 +902,9 @@ def _advertise_caller_info_as_required(*tools) -> None:
 
 
 _advertise_caller_info_as_required(create_wallet_pass, update_wallet_pass)
+_create_tool = server._tool_manager.get_tool("create_wallet_pass")
+_create_tool.description = _create_tool.description.replace("{free}", str(db.PER_IP_DAILY_LIMIT)).replace(
+    "{price}", payments.PRICE)
 
 
 @server.custom_route("/", methods=["GET"])
@@ -1003,15 +995,6 @@ def _bearer(request: Request) -> str | None:
 def _reject_unknown(body: dict, allowed) -> JSONResponse | None:
     unknown = set(body) - set(allowed)
     return _error(f"unknown field(s): {', '.join(sorted(unknown))}") if unknown else None
-
-
-def _auth_batch(key, batch_id: str | None = None) -> dict | None:
-    """The batch (with its design) for batch_key "<id>.<token>", else None: unknown id, wrong key, a pilot's
-    key, or (given batch_id) a key for another batch all look the same."""
-    if not isinstance(key, str):
-        return None
-    found = pilot.authenticate(batch_id or key.split(".")[0], key)
-    return pilot.with_design(found) if found is not None and found["kind"] == "batch" else None
 
 
 # The REST body accepts exactly the tool's parameters, validated with the same
@@ -1221,8 +1204,7 @@ def _pilot_for(request: Request, key, allow_batch: bool = False):
     if p is None:
         return None, _error("invalid pilot key", 403)
     if p["kind"] == "batch" and not allow_batch:
-        return None, _error("this is a paid batch: use create_wallet_pass_batch / update_wallet_pass_batch "
-                           "(REST: /api/batches)", 403)
+        return None, _error("paid batches are no longer offered", 403)
     return pilot.with_design(p), None
 
 
@@ -1509,416 +1491,6 @@ async def pilot_pass(request: Request) -> Response:
                              "Content-Disposition": 'inline; filename="pass.pkpass"'})
 
 
-# --- Paid batches: the organizer bulk upload (one design + attendee rows -> one permanent, updatable pass
-# link each) for any caller, over MCP (create_wallet_pass_batch / update_wallet_pass_batch) and REST
-# (/api/batches). Stored as pilots of kind 'batch'. No free tier: every new pass, and every pass re-signed by
-# a batch update, costs payments.PRICE, paid as one x402 payment for the whole call. ---
-
-BATCH_MAX_PASSES = int(os.environ.get("WALLET_MCP_BATCH_MAX_PASSES", 5000))
-BATCH_MAX_DAYS = 366  # event_end at most this far ahead (passes are stored until event_end + 7 days)
-BATCH_BUILDS_AT_ONCE = 2  # per call, so a big batch leaves BUILD_LIMITER slots for single passes
-_BatchDesign = create_model("BatchDesign", __config__=ConfigDict(extra="forbid"),
-                            **_tool_fields(create_wallet_pass, exclude=_CALL_PARAMS, style="eventTicket"))
-
-
-def _batch_links_csv(p: dict, key: str) -> str:
-    return f"{PUBLIC_BASE_URL}/api/pilot/{p['id']}/links.csv?key={key}"
-
-
-async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, contact_email, x402_ready,
-                        x402_payment, credit_key=None) -> dict:
-    """New batch (design + event_end) or more passes for an existing one (batch_key)."""
-    tool, start = "create_wallet_pass_batch", time.monotonic()
-    caller = caller.with_payment_argument(x402_payment, credit_key)
-    d = design if isinstance(design, dict) else {}
-    caller = _with_caller_info(caller, contact_email, x402_ready, "create", str(d.get("style") or "eventTicket"),
-                               str(d.get("organization_name") or "batch"))
-    rows, message = _pilot_rows(rows)
-    if message:
-        raise PassRejected(message, 400)
-    key = batch_key
-    if batch_key is not None:
-        if design is not None or event_end is not None:
-            raise PassRejected("with batch_key, leave out design and event_end: the batch keeps its own "
-                               "(change the design with update_wallet_pass_batch)", 400)
-        p, new_batch = _auth_batch(batch_key), False
-        if p is None:
-            raise PassRejected("unknown batch_key", 404)
-        if pilot.expires_epoch(p) <= time.time():
-            raise PassRejected("this batch's event has ended; no more passes can be issued", 400)
-    else:
-        if not isinstance(design, dict) or not isinstance(event_end, str):
-            raise PassRejected("a new batch needs design (create_wallet_pass's parameters, with {name} {ticket} "
-                               "{type} {email} placeholders) and event_end (ISO 8601)", 400)
-        try:
-            design = _BatchDesign.model_validate(design).model_dump(exclude_unset=True)
-            end = pilot.parse_end(event_end)
-        except ValidationError as e:
-            raise PassRejected(f"invalid design: {'; '.join(_validation_details(e))}", 400) from None
-        except ValueError:
-            raise PassRejected("event_end must be an ISO 8601 date or date-time, e.g. 2026-12-31T23:00:00Z", 400) from None
-        if end.timestamp() > time.time() + BATCH_MAX_DAYS * 86400:
-            raise PassRejected(f"event_end must be within {BATCH_MAX_DAYS} days", 400)
-        if end.timestamp() + pilot.GRACE_SECONDS <= time.time():
-            raise PassRejected("the design doesn't build: event end is in the past", 400)
-    unique = _unique_rows(rows)
-    verified = None
-    if batch_key is None:
-        # Only cheap checks before the payment gate: an unpaid call must not fetch images, sign anything or
-        # store a batch (#4). The sample row's pass.json is built here (images aren't needed for it); the
-        # images are fetched and a sample is signed by pilot.create, once the payment is verified.
-        style, org = design.get("style", "eventTicket"), design["organization_name"]
-        try:
-            sample = pilot.fill(pilot.ensure_field_keys(pilot.normalize_design(design, org, design["description"])),
-                                rows[0])
-            pkpass.validate_pass_json(sample)
-        except pass_builder.PassBuildError as e:
-            _log_failure(e, caller, "create", style, org, None, start)
-            raise PassRejected(f"the design doesn't build: {e}", 400) from None
-        if len(unique) > BATCH_MAX_PASSES:
-            raise PassRejected(f"a batch holds at most {BATCH_MAX_PASSES} passes; this call would add {len(unique)}",
-                               400)
-        verified = await anyio.to_thread.run_sync(lambda: _gate(
-            caller, len(unique), free_tier=False, tool=tool, path="/api/batches", action="create", style=style,
-            org=org))
-        try:
-            made = await anyio.to_thread.run_sync(lambda: pilot.create(
-                org, design["description"], caller.contact_email, event_end, design,
-                BATCH_MAX_PASSES, keep_colors=True, kind="batch", sample_row=rows[0]), limiter=BUILD_LIMITER)
-        except ValueError as e:  # PassBuildError: a bad image URL, or a design that doesn't sign
-            _log_failure(pass_builder.PassBuildError(str(e)), caller, "create", style, org, None, start)
-            raise PassRejected(f"the design doesn't build: {e}; nothing was charged", 400) from None
-        p, key, new_batch = pilot.with_design(made["pilot"]), made["key"], True
-    style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
-    try:
-        async with _pilot_lock(p["id"]):
-            fresh = [t for t in unique if t not in pilot.live_tickets(p["id"])]
-            total = pilot.issued_count(p["id"])
-            if total + len(fresh) > p["max_passes"]:
-                raise PassRejected(f"a batch holds at most {p['max_passes']} passes; it has {total} and this call "
-                                   f"would add {len(fresh)}", 400)
-            if not new_batch and fresh:
-                verified = await anyio.to_thread.run_sync(lambda: _gate(
-                    caller, len(fresh), free_tier=False, tool=tool, path="/api/batches", action="create",
-                    style=style, org=org))
-            results = await issue_rows(p, unique, caller.ip, logged=False, at_once=BATCH_BUILDS_AT_ONCE)
-            new_serials = [r["serial"] for r in results.values() if isinstance(r, dict) and r.get("new")]
-            failed = [(t, r) for t, r in results.items() if isinstance(r, Exception)]
-            if failed:
-                pilot.unissue(p["id"], new_serials)
-                if any(isinstance(e, LowDisk) for _, e in failed):
-                    logger.error("batch %s: stopped issuing, less than %d GB of disk free", p["id"],
-                                 MIN_FREE_DISK_BYTES // 1024 ** 3)
-                    _refuse(caller, "create", style, org, "server is low on disk space",
-                            PassRejected(f"{CAPACITY_ERROR}; nothing was charged", 503))
-                ticket, e = failed[0]
-                built = isinstance(e, pass_builder.PassBuildError)
-                _log_failure(e, caller, "create", style, org, None, start)
-                raise PassRejected(f"could not build the pass for {unique[ticket]['name']} ({ticket}): "
-                                   f"{e if built else 'internal error'}; nothing was charged", 400 if built else 500)
-            try:
-                receipt = await anyio.to_thread.run_sync(
-                    lambda: _settle(verified, lambda: pilot.unissue(p["id"], new_serials)))
-            except payments.PaymentError as e:
-                _log(caller, style=style, organization_name=org, success=False, error="payment settlement failed",
-                     duration_ms=int((time.monotonic() - start) * 1000), serial_number=None, action="create")
-                raise _payment_required(caller, tool, "/api/batches", str(e), len(fresh), free_tier=False) from None
-    except BaseException:
-        if new_batch:
-            pilot.delete(p["id"])
-        raise
-    ms = int((time.monotonic() - start) * 1000) // max(len(new_serials), 1)
-    for serial in new_serials:
-        _log(caller, style=style, organization_name=org, success=True, error=None, duration_ms=ms,
-             serial_number=serial, payment_tx=receipt and receipt.get("transaction"))
-    passes = assemble_passes(rows, results)
-    result = {"batch_id": p["id"], "passes": passes, "created": len(new_serials),
-              "reused": len(passes) - len(new_serials), "issued_total": pilot.issued_count(p["id"]),
-              "charged": payments.price_for(len(new_serials)) if receipt else "$0",
-              "links_csv_url": _batch_links_csv(p, key),
-              "updatable_until": db.iso(pilot.expires_epoch(p))}
-    if new_batch:
-        result = {"batch_key": key, **result}
-    if receipt:
-        result["payment"] = receipt
-    return result
-
-
-async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x402_ready, x402_payment,
-                        credit_key=None) -> dict:
-    """Merge changes into a batch's design, re-sign every live pass in it, and push them to iPhones.
-    Charged per live pass, and only once every new version is built: they are built into db.pass_staging,
-    the payment is settled, and then they and the new design go live in one transaction (#5). A failed
-    build or settlement leaves the passes and the saved design as they were."""
-    tool, start = "update_wallet_pass_batch", time.monotonic()
-    caller = caller.with_payment_argument(x402_payment, credit_key)
-    p = _auth_batch(batch_key)
-    if p is None:
-        raise PassRejected("unknown batch_key", 404)
-    style, org = p["design_obj"].get("style", "eventTicket"), p["org"]
-    caller = _with_caller_info(caller, contact_email, x402_ready, "update", style, org)
-    try:
-        changes = pilot.validate_changes(changes)
-    except ValueError as e:
-        raise PassRejected(str(e), 400) from None
-    async with _pilot_lock(p["id"]):
-        if pilot.expires_epoch(p) <= time.time():
-            raise PassRejected("this batch's event has ended; its passes can no longer be updated", 400)
-        targets = pilot.issued_rows(p["id"], live=True)
-        if not targets:
-            raise PassRejected("this batch has no live passes to update", 400)
-        merged = pilot.merge_changes(p["design_obj"], changes)
-
-        path = f"/api/batches/{p['id']}"
-
-        def check_all():
-            """Every pass's pass.json must build before anything is charged: that is where per-attendee
-            values can fail. Cheap (nothing is signed), so it runs before the payment gate."""
-            for row in targets:
-                try:
-                    pkpass.validate_pass_json(pilot.fill(merged, row), row["serial"], row["auth_token"])
-                except pass_builder.PassBuildError as e:
-                    raise pass_builder.PassBuildError(f"{row['name']} ({row['ticket']}): {e}") from None
-
-        try:
-            await anyio.to_thread.run_sync(check_all)
-        except pass_builder.PassBuildError as e:
-            _log_failure(e, caller, "update", style, org, None, start)
-            raise PassRejected(f"that change would not build: {e}; nothing was charged", 400) from None
-        verified = await anyio.to_thread.run_sync(lambda: _gate(
-            caller, len(targets), free_tier=False, tool=tool, path=path, action="update", style=style, org=org))
-        stage, swapped = f"{p['id']}.{secrets.token_hex(8)}", False
-        try:
-            done, errors = await rebuild_all({**p, "design_obj": merged}, targets, caller.ip, logged=False,
-                                             at_once=BATCH_BUILDS_AT_ONCE, stage=stage)
-            if errors or len(done) != len(targets):
-                e = errors[0] if errors else RuntimeError("a pass in this batch is no longer stored")
-                built = isinstance(e, pass_builder.PassBuildError)
-                _log_failure(e, caller, "update", style, org, None, start)
-                raise PassRejected(f"that change would not build: {e}; nothing was charged" if built
-                                   else "internal error rebuilding the passes; nothing was charged",
-                                   400 if built else 500)
-            try:
-                receipt = await anyio.to_thread.run_sync(lambda: _settle(verified, lambda: db.discard_stage(stage)))
-            except payments.PaymentError as e:
-                _log(caller, style=style, organization_name=org, success=False, error="payment settlement failed",
-                     duration_ms=int((time.monotonic() - start) * 1000), serial_number=None, action="update")
-                raise _payment_required(caller, tool, path, str(e), len(targets), free_tier=False) from None
-            try:
-                replaced = await anyio.to_thread.run_sync(lambda: db.swap_stage(
-                    stage, "UPDATE pilots SET design = ? WHERE id = ?", (json.dumps(merged), p["id"])))
-            except Exception:
-                logger.error("batch %s update was charged (%s) but its new versions could not be swapped in: %s",
-                             p["id"], receipt.get("transaction"), traceback.format_exc())
-                raise
-            swapped = True
-            if replaced != len(done):
-                logger.error("batch %s update: %d passes staged, %d swapped in", p["id"], len(done), replaced)
-        finally:
-            if not swapped:
-                with anyio.CancelScope(shield=True):
-                    await anyio.to_thread.run_sync(lambda: db.discard_stage(stage))
-        notified = await push_updates(done)
-    ms = int((time.monotonic() - start) * 1000) // max(len(targets), 1)
-    for row in targets:
-        _log(caller, style=style, organization_name=org, success=True, error=None, duration_ms=ms,
-             serial_number=row["serial"], action="update", payment_tx=receipt.get("transaction"))
-    return {"batch_id": p["id"], "updated": len(done), "notified_devices": notified,
-            "charged": payments.price_for(len(targets)), "payment": receipt}
-
-
-_BATCH_TOOL_ANNOTATIONS = dict(read_only_hint=False, idempotent_hint=False, open_world_hint=False)
-
-
-@server.tool(
-    title="Create Apple Wallet passes in bulk",
-    annotations=ToolAnnotations(title="Create Apple Wallet passes in bulk", destructive_hint=False,
-                                **_BATCH_TOOL_ANNOTATIONS),
-)
-async def create_wallet_pass_batch(
-    ctx: Context,
-    rows: list[dict],
-    design: dict | None = None,
-    event_end: str | None = None,
-    batch_key: str | None = None,
-    contact_email: str | None = None,
-    x402_ready: bool | Literal["unknown"] | None = None,
-    x402_payment: dict | str | None = None,
-    credit_key: str | None = None,
-) -> dict:
-    """Create one Apple Wallet pass per attendee from a single design, e.g. tickets for a guest list.
-
-    Paid, with no free tier: each new pass costs {price} in USDC on Base via x402, charged as one
-    payment for the whole call ({price} x the number of new passes). The first call is refused with
-    the exact amount; retry it unchanged with the signed payment in x402_payment. Nothing is charged
-    unless every pass builds. A row whose ticket is already in the batch is not charged again and gets
-    the same link.
-
-    Each pass gets a permanent https link (not the 1-hour download link of create_wallet_pass) that
-    always serves the latest version, and stays installable and updatable until event_end + 7 days.
-    Send the links to attendees yourself (email, WhatsApp, a form); this service sends nothing.
-
-    Args:
-        rows: up to 1000 attendees per call (5000 per batch), each {"name": str, "ticket": str,
-            "type": optional str (default "General admission"), "email": optional str}. ticket is
-            the unique id within the batch (and the default barcode message). Parse a CSV into
-            these rows yourself.
-        design: for a new batch, create_wallet_pass's parameters (style, organization_name,
-            description, colors, fields, images, ...; not serial_number/updatable/contact_email)
-            whose strings may contain {name} {ticket} {type} {email}, filled in per attendee.
-            Defaults: style "eventTicket", barcode_message "{ticket}". Leave out with batch_key.
-        event_end: for a new batch, when the event ends (ISO 8601, within a year). Leave out with batch_key.
-        batch_key: to add attendees to a batch made earlier, the batch_key it returned.
-        contact_email, x402_ready, x402_payment, credit_key: as for create_wallet_pass (all calls are
-            paid here: credit_key spends 1 card credit per new pass instead of an x402 payment).
-
-    Returns {batch_key (new batch only: it can't be recovered, give it to the user), batch_id,
-    passes: [{name, ticket, type, email, link, new}], created, reused, issued_total, charged,
-    links_csv_url (all links as a CSV, also secret), updatable_until, payment}.
-    """
-    caller = Caller.from_mcp(ctx)
-    try:
-        return _mcp_result(await _create_batch(
-            caller, design=design, rows=rows, event_end=event_end, batch_key=batch_key,
-            contact_email=contact_email, x402_ready=x402_ready, x402_payment=x402_payment, credit_key=credit_key))
-    except PassRejected as e:
-        return _mcp_rejection(e)
-
-
-@server.tool(
-    title="Update Apple Wallet passes in bulk",
-    annotations=ToolAnnotations(title="Update Apple Wallet passes in bulk", destructive_hint=True,
-                                **_BATCH_TOOL_ANNOTATIONS),
-)
-async def update_wallet_pass_batch(
-    ctx: Context,
-    batch_key: str,
-    header_fields: list[dict] | None = None,
-    primary_fields: list[dict] | None = None,
-    secondary_fields: list[dict] | None = None,
-    auxiliary_fields: list[dict] | None = None,
-    back_fields: list[dict] | None = None,
-    relevant_date: str | None = None,
-    locations: list[dict] | None = None,
-    change_message: str | None = None,
-    contact_email: str | None = None,
-    x402_ready: bool | Literal["unknown"] | None = None,
-    x402_payment: dict | str | None = None,
-    credit_key: str | None = None,
-) -> dict:
-    """Change every pass in a batch made with create_wallet_pass_batch (e.g. a new time or venue);
-    every iPhone that added one refreshes within seconds.
-
-    Paid: {price} per pass in the batch, as one x402 payment (refused first with the exact amount;
-    retry unchanged with x402_payment, or send credit_key: 1 card credit per pass). Nothing is charged if
-    the change doesn't build.
-
-    Each field list given replaces that list in the design (resend unchanged fields too; strings may
-    use {name} {ticket} {type} {email}). change_message (e.g. "Doors now open at %@") is shown on the
-    lock screen for fields whose value changed. contact_email and x402_ready are required.
-
-    Returns {batch_id, updated, notified_devices, charged, payment}.
-    """
-    changes = {k: v for k, v in locals().items()
-               if k not in ("ctx", "batch_key", "contact_email", "x402_ready", "x402_payment", "credit_key")}
-    caller = Caller.from_mcp(ctx)
-    try:
-        return _mcp_result(await _update_batch(
-            caller, batch_key=batch_key, changes=changes, contact_email=contact_email, x402_ready=x402_ready,
-            x402_payment=x402_payment, credit_key=credit_key))
-    except PassRejected as e:
-        return _mcp_rejection(e)
-
-
-for _tool in (create_wallet_pass_batch, update_wallet_pass_batch):
-    _tool_obj = server._tool_manager.get_tool(_tool.__name__)
-    _tool_obj.description = _tool_obj.description.replace("{price}", payments.PRICE)
-_advertise_caller_info_as_required(create_wallet_pass_batch, update_wallet_pass_batch)
-
-
-_BATCH_CREATE_KEYS = {"rows", "design", "event_end", "contact_email", "x402_ready", "x402_payment", "credit_key"}
-_BATCH_UPDATE_KEYS = {*pilot.UPDATE_KEYS, "contact_email", "x402_ready", "x402_payment", "credit_key"}
-
-
-def _batch_key(request: Request) -> str | None:
-    """The Bearer batch_key, if it is for the batch in the path."""
-    key = _bearer(request)
-    return key if key and key.startswith(request.path_params["id"] + ".") else None
-
-
-_NO_BATCH_KEY = "send the batch_key as 'Authorization: Bearer <batch_key>'"
-
-
-async def _batch_api(run) -> Response:
-    try:
-        return _api_result(await run())
-    except PassRejected as e:
-        return _api_rejection(e)
-    except Exception:
-        logger.error("batch API failed: %s", traceback.format_exc())
-        return _error("internal error", 500)
-
-
-@server.custom_route("/api/batches", methods=["POST"])
-async def api_create_batch(request: Request) -> Response:
-    """New batch: {design, event_end, rows, contact_email, x402_ready[, x402_payment]}."""
-    body, err = await _json_body(request)
-    if err or (err := _reject_unknown(body, _BATCH_CREATE_KEYS)):
-        return err
-    caller = Caller.from_api(request)
-    return await _batch_api(lambda: _create_batch(caller, batch_key=None, **{k: body.get(k) for k in _BATCH_CREATE_KEYS}))
-
-
-@server.custom_route("/api/batches/{id}/passes", methods=["POST"])
-async def api_add_to_batch(request: Request) -> Response:
-    """More attendees: {rows, contact_email, x402_ready[, x402_payment]}, batch_key as Bearer."""
-    key = _batch_key(request)
-    if not key:
-        return _error(_NO_BATCH_KEY, 401)
-    body, err = await _json_body(request)
-    if err or (err := _reject_unknown(body, _BATCH_CREATE_KEYS - {"design", "event_end"})):
-        return err
-    caller = Caller.from_api(request)
-    return await _batch_api(lambda: _create_batch(caller, batch_key=key, design=None, event_end=None,
-                                                  **{k: body.get(k) for k in _BATCH_CREATE_KEYS - {"design", "event_end"}}))
-
-
-@server.custom_route("/api/batches/{id}", methods=["PATCH"])
-async def api_update_batch(request: Request) -> Response:
-    """Change every pass: {header_fields, ..., change_message, contact_email, x402_ready[, x402_payment]}."""
-    key = _batch_key(request)
-    if not key:
-        return _error(_NO_BATCH_KEY, 401)
-    body, err = await _json_body(request)
-    if err or (err := _reject_unknown(body, _BATCH_UPDATE_KEYS)):
-        return err
-    caller = Caller.from_api(request)
-    changes = {k: body[k] for k in pilot.UPDATE_KEYS if k in body}
-    return await _batch_api(lambda: _update_batch(caller, batch_key=key, changes=changes,
-                                                  contact_email=body.get("contact_email"),
-                                                  x402_ready=body.get("x402_ready"),
-                                                  x402_payment=body.get("x402_payment"),
-                                                  credit_key=body.get("credit_key")))
-
-
-@server.custom_route("/api/batches/{id}", methods=["GET"])
-async def api_get_batch(request: Request) -> Response:
-    """The batch and every link, batch_key as Bearer (or ?key= for a browser)."""
-    key = _bearer(request) or request.query_params.get("key")
-    p = _auth_batch(key, request.path_params["id"])
-    if p is None:
-        return _error("unknown batch or wrong batch_key", 404)
-    passes = [{"name": r["name"], "ticket": r["ticket"], "type": r["type"], "email": r["email"],
-               "link": pilot.pass_link(r["serial"], r["auth_token"])} for r in pilot.issued_rows(p["id"])]
-    return JSONResponse({"batch_id": p["id"], "organization_name": p["org"], "description": p["event_name"],
-                         "event_end": p["event_end"], "updatable_until": db.iso(pilot.expires_epoch(p)),
-                         "issued_total": len(passes), "max_passes": p["max_passes"], "design": p["design_obj"],
-                         "passes": passes, "links_csv_url": _batch_links_csv(p, key)},
-                        headers={"Cache-Control": "no-store"})
-
-
-
-
 # --- Card payments: prepaid pass credits through Dodo Payments (credits.py) ---
 
 def _buy_credits(caller: Caller, pack, contact_email, credit_key) -> dict:
@@ -1936,7 +1508,7 @@ def _buy_credits(caller: Caller, pack, contact_email, credit_key) -> dict:
     out["next_steps"] = (
         "Give the user checkout_url to pay by card (Dodo Payments, our merchant of record). Credits appear on the "
         "credit_key within a minute of payment; check with check_pass_credits. Then send credit_key with "
-        "create_wallet_pass / update_wallet_pass / the batch tools: each pass past the free ones uses 1 credit."
+        "create_wallet_pass / update_wallet_pass: each pass past the free ones uses 1 credit."
         + (" Tell the user to save the credit_key somewhere safe: it is shown only now, can't be recovered, "
            "and works from any chat or app." if "credit_key" in out else ""))
     logger.info("checkout started: pack %s from %s", pack, caller.ip)
@@ -1963,7 +1535,7 @@ async def buy_pass_credits(ctx: Context, pack: Literal["100", "500", "2000"], co
 
     Returns {credit_key (new keys only: shown once, give it to the user to keep), checkout_url,
     pack, credits_left, next_steps}. Credits are added within a minute of payment; then pass
-    credit_key to create_wallet_pass, update_wallet_pass or the batch tools.
+    credit_key to create_wallet_pass or update_wallet_pass.
     """
     caller = Caller.from_mcp(ctx)
     try:

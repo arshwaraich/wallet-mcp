@@ -1,6 +1,6 @@
 """Tests card payments: prepaid pass credits bought through Dodo Payments (credits.py), against a fake Dodo API
 in this process. Buy -> checkout link + credit_key; signed webhook credits the key (unsigned/stale/replayed
-refused or ignored); paid singles, updates and batches spend credits; free calls don't; not enough credits ->
+refused or ignored); paid singles and updates spend credits; free calls don't; not enough credits ->
 402 with the card offer; refunds take credits back; MCP tools. x402 stays on alongside (fake facilitator).
 Run: .venv/bin/python tests/test_credits.py"""
 import asyncio, base64, hashlib, hmac, json, sqlite3, threading, time, uuid
@@ -162,7 +162,7 @@ try:
     check("paid single with credit_key -> 200, 1 credit used, 99 left",
           r.status_code == 200 and res["payment"] == {"method": "pass_credits", "credits_used": 1, "credits_left": 99,
                                                       "transaction": "dodo-credits"}, res)
-    check("no x402 setup hint on a credits call", "x402_setup" not in res)
+    check("no x402 setup hint on a credits call", "payment_setup" not in res)
     check("logged as paid (payment_tx dodo-credits)", rows()[-1] == (1, 0, "dodo-credits"), rows()[-1])
     r = httpx.post(f"{base}/api/passes", json={**PASS, "credit_key": key, "updatable_hours": 5})
     left = httpx.get(f"{base}/api/credits", headers={"authorization": f"Bearer {key}"}).json()["credits_left"]
@@ -174,34 +174,25 @@ try:
                     headers={"authorization": f"Bearer {edit}"})
     check("update paid with credits", r.status_code == 200 and r.json()["payment"]["credits_left"] == 97, r.text)
 
-    end = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 3 * 86400))
-    batch = {"design": {"organization_name": "Card Gala", "description": "Gala"}, "event_end": end,
-             "rows": [{"name": "A", "ticket": "T1"}, {"name": "B", "ticket": "T2"}, {"name": "C", "ticket": "T3"}],
-             "credit_key": key, **CALLER}
-    r = httpx.post(f"{base}/api/batches", json=batch)
-    res = r.json()
-    check("batch of 3 paid with credits -> 94 left", r.status_code == 200 and res["created"] == 3
-          and res["payment"]["credits_used"] == 3 and res["payment"]["credits_left"] == 94, r.text)
-
     # top-up the same key
     r = httpx.post(f"{base}/api/credits", json={"pack": "500", "contact_email": "buyer@realco.dev", "credit_key": key})
     check("top-up returns no new key", r.status_code == 200 and "credit_key" not in r.json(), r.text)
     pid2 = dodo.pay()
     hook(paid_event(pid2))
     left = httpx.get(f"{base}/api/credits", headers={"authorization": f"Bearer {key}"}).json()["credits_left"]
-    check("top-up credited 500 -> 594", left == 594, left)
+    check("top-up credited 500 -> 597", left == 597, left)
 
     # refund
     r = hook({"type": "refund.succeeded", "data": {"payment_id": pid2}})
     left = httpx.get(f"{base}/api/credits", headers={"authorization": f"Bearer {key}"}).json()["credits_left"]
-    check("refund takes the pack back -> 94", left == 94 and "took back 500" in r.text, (left, r.text))
+    check("refund takes the pack back -> 97", left == 97 and "took back 500" in r.text, (left, r.text))
 
     # --- MCP ---
     tools, res = asyncio.run(mcp_call("check_pass_credits", {"credit_key": key}))
     check("MCP lists buy/check tools", {"buy_pass_credits", "check_pass_credits"} <= tools, tools)
-    check("MCP check_pass_credits", not res.is_error and sc(res)["credits_left"] == 94, res)
+    check("MCP check_pass_credits", not res.is_error and sc(res)["credits_left"] == 97, res)
     _, res = asyncio.run(mcp_call("create_wallet_pass", {**PASS, "credit_key": key}))
-    check("MCP paid create with credit_key", not res.is_error and sc(res)["payment"]["credits_left"] == 93
+    check("MCP paid create with credit_key", not res.is_error and sc(res)["payment"]["credits_left"] == 96
           and not (res.meta or {}).get("x402/payment-response"), res)
     _, res = asyncio.run(mcp_call("buy_pass_credits", {"pack": "2000", "contact_email": "buyer@realco.dev"}))
     check("MCP buy_pass_credits -> new key + link", not res.is_error and

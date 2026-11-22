@@ -1,4 +1,4 @@
-"""10 free passes a day for everyone, except contact_emails in the exempt file (old 30 -> 20 limit).
+"""2 free passes a day for everyone, except contact_emails in the exempt file (old 30 -> 20 limit).
 
 Runs db.py directly against a throwaway db and exempt file; no server."""
 import os
@@ -27,17 +27,17 @@ check("until= in the future keeps it", db.is_exempt("soon@x.com"))
 check("until= is the first non-exempt day (UTC)", not db.is_exempt("t@x.com") and
       [e["active"] for e in db.exemptions()] == [True, False, True])
 check("other emails not exempt", not db.is_exempt("someone@else.com") and not db.is_exempt(None))
-check("default free limit is 10", db.per_ip_daily_limit() == 10)
+check("default free limit is 2", db.per_ip_daily_limit() == 2)
 check("exempt limit is 30 or 20", db.per_ip_daily_limit(True) == (20 if db._today_start() >= "2026-11-18" else 30))
 
 ip = "203.0.113.9"
-for _ in range(10):
+for _ in range(2):
     ok = db.check_rate_limit(ip) is None
     db.log_request(ip=ip, style="generic", organization_name="o", success=True, error=None, duration_ms=1,
                    serial_number="s", source="api")
-check("first 10 calls free", ok)
+check("first 2 calls free", ok)
 err = db.check_rate_limit(ip)
-check("11th call refused", err and err.startswith("rate limit exceeded: 10 free passes a day"), err)
+check("3rd call refused", err and err.startswith("rate limit exceeded: 2 free passes a day"), err)
 check("exempt caller on same IP still free", db.check_rate_limit(ip, exempt=True) is None)
 check("other IP still gets its free pass", db.check_rate_limit("203.0.113.10") is None)
 

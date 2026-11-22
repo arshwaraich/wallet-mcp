@@ -72,11 +72,11 @@ def offline_tests():
         r2 = httpx.post(f"{base}/api/passes", json=PASS, headers={"payment-signature": "ignored-under-limit"})
         check("free calls under the limit work, a payment sent with one is ignored",
               r.status_code == r2.status_code == 200 and "payment" not in r2.json() and not seen, r2.text)
-        check("x402_ready=False gets the setup hint", r2.json().get("x402_setup", {}).get("guide")
+        check("x402_ready=False gets the setup hint", r2.json().get("payment_setup", {}).get("x402_guide")
               == "https://walletmcppass.com/#wallet-setup", r2.text)
         check("hint says how many free passes are left", r.json().get("free_passes_left_today") == 1
-              and r.json()["x402_setup"]["message"].startswith("1 free pass left today.")
-              and r2.json()["x402_setup"]["message"].startswith("That was the last free pass today."), r.text)
+              and r.json()["payment_setup"]["message"].startswith("1 free pass left today.")
+              and r2.json()["payment_setup"]["message"].startswith("That was the last free pass today."), r.text)
 
         # --- REST ---
         r = httpx.post(f"{base}/api/passes", json=PASS)
@@ -175,10 +175,10 @@ def offline_tests():
 
         res = asyncio.run(mcp_call(base, "create_wallet_pass", PASS, meta={"x402/payment": sign(pr)}))
         check("MCP paid call -> pass", not res.is_error and "download_url" in (res.structured_content or {}), res)
-        check("paid MCP result carries no setup hint", "x402_setup" not in (res.structured_content or {}), res)
+        check("paid MCP result carries no setup hint", "payment_setup" not in (res.structured_content or {}), res)
         res = asyncio.run(mcp_call(base, "create_wallet_pass", {**PASS, "x402_ready": True},
                                    meta={"x402/payment": sign(pr)}))
-        check("x402_ready=True gets no setup hint", not res.is_error and "x402_setup" not in res.structured_content, res)
+        check("x402_ready=True gets no setup hint", not res.is_error and "payment_setup" not in res.structured_content, res)
         check("MCP paid result has the receipt in _meta",
               (res.meta or {}).get("x402/payment-response", {}).get("transaction") == "0xfeed", res.meta)
 
@@ -258,23 +258,17 @@ def capacity_tests():
     finally:
         srv.stop()
 
-    # Facilitator down: one behaviour for singles and batches, a 503 (retry later), refusal logged.
+    # Facilitator down: a 503 (retry later), refusal logged.
     srv, base, db_path = start_server("http://127.0.0.1:9", ip_limit=0)
     try:
         r = httpx.post(f"{base}/api/passes", json=PASS)
         check("facilitator down, past the free limit -> 503 naming the limit",
               r.status_code == 503 and r.json()["error"].startswith("payments are unavailable")
               and "rate limit exceeded" in r.json()["error"], r.text)
-        end = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 86400))
-        r = httpx.post(f"{base}/api/batches", json={"design": {"organization_name": "B", "description": "d"},
-                                                     "event_end": end, "rows": [{"name": "A", "ticket": "1"}], **CALLER})
-        check("facilitator down, batch -> 503", r.status_code == 503 and "payments are unavailable" in r.json()["error"],
-              r.text)
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute("SELECT error FROM requests WHERE refused = 1 ORDER BY id").fetchall()
-        check("both refusals logged refused=1 with the unchanged texts",
-              len(rows) == 2 and rows[0][0].startswith("rate limit exceeded")
-              and rows[1][0].startswith("Batches are paid: 1 new pass at"), rows)
+        check("refusal logged refused=1 with the unchanged text",
+              len(rows) == 1 and rows[0][0].startswith("rate limit exceeded"), rows)
     finally:
         srv.stop()
 

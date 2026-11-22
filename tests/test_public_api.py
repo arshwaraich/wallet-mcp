@@ -1,7 +1,7 @@
 """Pins the public API to tests/fixtures/public_api.json, so refactors can't change it by accident:
 the MCP tools exactly as list_tools() sends them (name, title, description, inputSchema,
 outputSchema, annotations), the server instructions, and the JSON schemas of the REST request bodies (POST
-/api/passes, PATCH /api/passes/{serial}, a batch design). Real server on a throwaway db, with fixed
+/api/passes, PATCH /api/passes/{serial}). Real server on a throwaway db, with fixed
 env so env-dependent text (free limit, price) is stable.
 Run: .venv/bin/python tests/test_public_api.py
 After an intended API change: .venv/bin/python tests/test_public_api.py --update, and review the diff."""
@@ -22,7 +22,7 @@ base, env = srv.base, srv.env
 REST_MODELS = """
 import json, server
 print(json.dumps({name: getattr(server, name).model_json_schema()
-                  for name in ("_PassRequest", "_UpdateRequest", "_BatchDesign")}))
+                  for name in ("_PassRequest", "_UpdateRequest")}))
 """
 
 
