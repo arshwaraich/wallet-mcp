@@ -15,7 +15,6 @@ shared signing service, not a per-caller cert. Free up to the per-IP daily
 limit; past it, a caller can pay per call with x402 (payments.py) instead of
 being refused, without any change to the tool interface.
 """
-import contextlib
 import csv
 import inspect
 import io
@@ -42,11 +41,9 @@ import anyio
 
 import apns
 import credits
-import csv_clean
 import db
 import pass_builder
 import payments
-import pilot
 import pkpass
 import site_stats
 from mcp.server.mcpserver import MCPServer
@@ -70,12 +67,15 @@ DOWNLOAD_TTL_SECONDS = 60 * 60  # 1 hour, matches fileshare.py's convention
 MIN_FREE_DISK_BYTES = int(os.environ.get("WALLET_MCP_MIN_FREE_DISK_GB", 5)) * 1024 ** 3
 CAPACITY_ERROR = "the service is temporarily out of capacity, try again later"
 BUILD_LIMITER = anyio.CapacityLimiter(4)
+
+
+def _disk_ok() -> bool:
+    return shutil.disk_usage(DOWNLOAD_DIR).free >= MIN_FREE_DISK_BYTES
 MAX_UPDATABLE_HOURS = 30 * 24  # updatable passes are stored for 1 hour by default, at most 30 days
 DEFAULT_ICON_COLOR = pkpass.DEFAULT_ICON_COLOR
 
 db.init()
 credits.init()
-pilot.init()
 
 server = MCPServer(
     "wallet-mcp",
@@ -127,7 +127,6 @@ def _sweep_downloads() -> None:
             purged = db.purge_expired_passes()
             if purged:
                 logger.info("deleted %d updatable pass(es) whose update window ended", purged)
-            pilot.purge_orphans()
             db.purge_stale_stages()
         except Exception:
             logger.error("purging expired passes failed: %s", traceback.format_exc())
@@ -752,12 +751,11 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
     return result
 
 
-# --- The payment gate, shared by single passes and batches. Order: capacity, the failure limit, the free
-# daily limit (single passes only; batches have no free tier), the paid daily cap, then the caller's x402
-# payment, verified but not charged. The work happens next, and _settle charges only once every pass is built
+# --- The payment gate. Order: capacity, the failure limit, the free daily limit, the paid daily cap, then
+# the caller's card credits (held) or x402 payment (verified), neither charged yet. The work happens next, and _settle charges only once every pass is built
 # and stored. Every refusal is logged with refused=1; the refusal texts are matched by the usage watcher, so
 # they must not change. If the facilitator can't be reached to quote a price, the call gets a 503 (the
-# server's problem, not the caller's: retry later), for single passes and batches alike. ---
+# server's problem, not the caller's: retry later). ---
 
 def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, action: str, style: str,
           org: str):
@@ -766,7 +764,7 @@ def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, 
     route the x402 resource points at."""
     if not free_tier and not (payments.enabled or credits.enabled):
         _refuse(caller, action, style, org, "paid-only calls need payments, which are not set up here", 503)
-    if not _pilot_disk_ok():
+    if not _disk_ok():
         logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
         _refuse(caller, action, style, org, "server is low on disk space",
                 PassRejected(CAPACITY_ERROR, 503))
@@ -965,7 +963,7 @@ async def api_requests_csv(request: Request) -> Response:
 # --- REST helpers shared by every JSON route ---
 
 # Base64 images travel in the /api/passes bodies. nginx lets 1 MB through there today; the app's cap sits
-# above that (as on the pilot and batch routes) so it never refuses a request nginx would pass.
+# above that so it never refuses a request nginx would pass.
 BODY_LIMIT = 3 * 1024 * 1024
 
 
@@ -1172,323 +1170,6 @@ async def download(request: Request) -> Response:
         media_type="application/vnd.apple.pkpass",
         filename="pass.pkpass",
     )
-
-
-# --- Organizer pilots (pilot.py): REST API behind a secret "<id>.<token>" key; attendee pass links ---
-
-PILOT_CSV_LIMIT = 2 * 1024 * 1024
-CLEAN_LIMITER = anyio.CapacityLimiter(2)  # a clean may wait on a model call for up to a minute
-_pilot_locks: dict = {}  # pilot id -> [lock, tasks holding or waiting for it]; dropped once that is 0
-
-
-@contextlib.asynccontextmanager
-async def _pilot_lock(pilot_id: str):
-    """One pilot/batch's issue and update calls run one at a time. The entry is counted before waiting
-    and dropped by the last user, all on the event loop thread, so every concurrent caller for an id
-    shares one lock and the dict holds only ids in use."""
-    entry = _pilot_locks.setdefault(pilot_id, [anyio.Lock(), 0])
-    entry[1] += 1
-    try:
-        async with entry[0]:
-            yield
-    finally:
-        entry[1] -= 1
-        if entry[1] == 0:
-            del _pilot_locks[pilot_id]
-
-
-def _pilot_for(request: Request, key, allow_batch: bool = False):
-    """(pilot, None) or (None, error response). Wrong key and unknown id look the same. Paid batches
-    share the read-only routes (details, links.csv) but not the free issue/clean/update ones."""
-    p = pilot.authenticate(request.path_params["id"], key)
-    if p is None:
-        return None, _error("invalid pilot key", 403)
-    if p["kind"] == "batch" and not allow_batch:
-        return None, _error("paid batches are no longer offered", 403)
-    return pilot.with_design(p), None
-
-
-def _pilot_disk_ok() -> bool:
-    return shutil.disk_usage(DOWNLOAD_DIR).free >= MIN_FREE_DISK_BYTES
-
-
-class LowDisk(Exception):
-    """issue_rows stopped issuing because the disk filled up while it ran."""
-
-    def __init__(self):
-        super().__init__("server is low on disk space")
-
-
-
-def _pilot_preview_path(pilot_id: str) -> Path:
-    return pilot.PREVIEW_DIR / f"{pilot_id}.png"
-
-
-@server.custom_route("/api/pilot/{id}", methods=["GET"])
-async def api_pilot_get(request: Request) -> Response:
-    p, err = _pilot_for(request, request.query_params.get("key"), allow_batch=True)
-    if err:
-        return err
-    return JSONResponse({
-        "id": p["id"], "org": p["org"], "event_name": p["event_name"], "event_end": p["event_end"],
-        "design": p["design_obj"], "sample_url": pilot.sample_link(p),
-        "preview_png_url": f"{PUBLIC_BASE_URL}/api/pilot/{p['id']}/preview.png"
-        if _pilot_preview_path(p["id"]).exists() else None,
-        "issued": pilot.issued_count(p["id"]), "max_passes": p["max_passes"], "contact_email": p["contact_email"],
-    })
-
-
-@server.custom_route("/api/pilot/{id}/preview.png", methods=["GET"])
-async def api_pilot_preview(request: Request) -> Response:
-    pilot_id = request.path_params["id"]
-    path = _pilot_preview_path(pilot_id)
-    if not pilot.ID_RE.match(pilot_id) or not path.is_file():
-        return _error("no preview", 404)
-    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
-
-
-@server.custom_route("/api/pilot/{id}/clean", methods=["POST"])
-async def api_pilot_clean(request: Request) -> Response:
-    body, err = await _json_body(request)
-    if err:
-        return err
-    p, err = _pilot_for(request, body.get("key"))
-    if err:
-        return err
-    text = body.get("csv")
-    if not isinstance(text, str) or not text.strip():
-        return _error("csv must be the file's text")
-    if len(text.encode()) > PILOT_CSV_LIMIT:
-        return _error("csv is larger than 2 MB", 413)
-    result = await anyio.to_thread.run_sync(lambda: csv_clean.clean(text, salt=p["id"]), limiter=CLEAN_LIMITER)
-    return JSONResponse(result)
-
-
-def _pilot_rows(raw):
-    """(rows, None) or (None, message): validated {name, email, ticket, type} rows, repeats of a ticket dropped
-    after the first (they get the same link)."""
-    if not isinstance(raw, list) or not raw:
-        return None, "rows must be a non-empty list"
-    if len(raw) > pilot.MAX_ROWS_PER_REQUEST:
-        return None, f"at most {pilot.MAX_ROWS_PER_REQUEST} rows per request"
-    rows = []
-    for i, r in enumerate(raw, 1):
-        if not isinstance(r, dict):
-            return None, f"row {i}: must be an object"
-        vals = {k: r.get(k, "") for k in ("name", "email", "ticket", "type")}
-        if any(not isinstance(v, str) for v in vals.values()):
-            return None, f"row {i}: name, email, ticket and type must be strings"
-        vals = {k: v.strip() for k, v in vals.items()}
-        vals["type"] = vals["type"] or csv_clean.DEFAULT_TYPE
-        if not vals["name"] or len(vals["name"]) > 120:
-            return None, f"row {i}: name is required (max 120 characters)"
-        if not vals["ticket"] or len(vals["ticket"]) > 64:
-            return None, f"row {i}: ticket is required (max 64 characters)"
-        if len(vals["type"]) > 100:
-            return None, f"row {i}: type is too long"
-        if vals["email"] and not csv_clean.EMAIL_RE.match(vals["email"]):
-            return None, f"row {i}: invalid email"
-        rows.append(vals)
-    return rows, None
-
-
-# --- The engine shared by organizer pilots (free, set up by the operator) and paid batches. The real
-# differences are parameters: batches log only once paid (logged=False), cap their own concurrent builds
-# (at_once) so a big batch leaves BUILD_LIMITER slots for single passes, roll back a partial issue, and
-# stage an update's new versions until the payment settles (stage=). ---
-
-def _unique_rows(rows: list[dict]) -> dict:
-    """ticket -> the first row with that ticket (repeats of a ticket get the same pass)."""
-    unique: dict = {}
-    for row in rows:
-        unique.setdefault(row["ticket"], row)
-    return unique
-
-
-def _at_most(at_once: int | None):
-    return anyio.Semaphore(at_once) if at_once else contextlib.nullcontext()
-
-
-async def issue_rows(p: dict, unique: dict, ip: str, *, logged: bool = True, at_once: int | None = None) -> dict:
-    """Issue (or find) the pass for every unique row, concurrently: ticket -> pilot.issue_one's result, or the
-    exception it raised (LowDisk for rows not tried because the disk is full). Nothing is rolled back here: a
-    caller that wants all-or-nothing unissues."""
-    results: dict = {}
-    limit = _at_most(at_once)
-
-    async def work(ticket, row):
-        async with limit:
-            if not _pilot_disk_ok():  # checked per pass: a big issue can fill the disk while it runs
-                results[ticket] = LowDisk()
-                return
-            try:
-                results[ticket] = await anyio.to_thread.run_sync(
-                    lambda: pilot.issue_one(p, row, ip, logged), limiter=BUILD_LIMITER)
-            except Exception as e:
-                if not isinstance(e, pass_builder.PassBuildError):
-                    logger.error("issuing a pass failed: %s", traceback.format_exc())
-                results[ticket] = e
-
-    async with anyio.create_task_group() as tg:
-        for ticket, row in unique.items():
-            tg.start_soon(work, ticket, row)
-    return results
-
-
-def assemble_passes(rows: list[dict], results: dict) -> list[dict]:
-    """One entry per requested row, in request order; a repeated ticket has the same link and new=False."""
-    passes, seen = [], set()
-    for row in rows:
-        r = results[row["ticket"]]
-        passes.append({**row, "link": r["link"], "new": r["new"] and row["ticket"] not in seen})
-        seen.add(row["ticket"])
-    return passes
-
-
-async def rebuild_all(p: dict, targets: list[dict], ip: str, *, logged: bool = True, at_once: int | None = None,
-                      stage: str | None = None) -> tuple[list[str], list[Exception]]:
-    """Rebuild every target's pass from p['design_obj'], concurrently. Returns (serials rebuilt, errors); a
-    pass that is gone is in neither. With stage, the new versions go to db.pass_staging instead of going
-    live, and the first error stops the remaining builds (the whole update is refused anyway)."""
-    done, errors = [], []
-    limit = _at_most(at_once)
-
-    async def work(row):
-        async with limit:
-            if errors and stage:
-                return
-            try:
-                if await anyio.to_thread.run_sync(lambda: pilot.rebuild_one(p, row, ip, logged, stage),
-                                                  limiter=BUILD_LIMITER):
-                    done.append(row["serial"])
-            except Exception as e:
-                errors.append(e)
-                logger.error("rebuilding a pass failed: %s", traceback.format_exc())
-
-    async with anyio.create_task_group() as tg:
-        for row in targets:
-            tg.start_soon(work, row)
-    return done, errors
-
-
-async def push_updates(serials: list[str]) -> int:
-    """APNs push to every device holding one of these passes; drops tokens APNs says are dead."""
-    tokens = await anyio.to_thread.run_sync(pilot.all_push_tokens, serials)
-    notified, dead = await anyio.to_thread.run_sync(apns.push, tokens)
-    pilot.drop_dead_tokens(dead)
-    return notified
-
-
-@server.custom_route("/api/pilot/{id}/issue", methods=["POST"])
-async def api_pilot_issue(request: Request) -> Response:
-    body, err = await _json_body(request)
-    if err:
-        return err
-    p, err = _pilot_for(request, body.get("key"))
-    if err:
-        return err
-    rows, message = _pilot_rows(body.get("rows"))
-    if message:
-        return _error(message)
-    if pilot.expires_epoch(p) <= time.time():
-        return _error("this event has ended; no more passes can be issued")
-    if not _pilot_disk_ok():
-        return _error(CAPACITY_ERROR, 503)
-    ip = _client_ip(request)
-    unique = _unique_rows(rows)
-    async with _pilot_lock(p["id"]):
-        live = pilot.live_tickets(p["id"])
-        fresh = [t for t in unique if t not in live]
-        total = pilot.issued_count(p["id"])
-        if total + len(fresh) > p["max_passes"]:
-            return _error(f"this pilot is limited to {p['max_passes']} passes; {total} are issued and this "
-                         f"request would add {len(fresh)} more")
-        results = await issue_rows(p, unique, ip)
-        if any(isinstance(r, LowDisk) for r in results.values()):
-            logger.error("pilot %s: stopped issuing, less than %d GB of disk free", p["id"],
-                         MIN_FREE_DISK_BYTES // 1024 ** 3)
-            return _error(CAPACITY_ERROR, 503)
-        for ticket, r in results.items():
-            if isinstance(r, Exception):
-                who = unique[ticket]["name"]
-                msg = str(r) if isinstance(r, pass_builder.PassBuildError) else "internal error building the pass"
-                return _error(f"could not build the pass for {who} ({ticket}): {msg}",
-                             400 if isinstance(r, pass_builder.PassBuildError) else 500)
-        passes = assemble_passes(rows, results)
-        created = sum(1 for x in passes if x["new"])
-        return JSONResponse({"passes": passes, "created": created, "reused": len(passes) - created,
-                             "issued_total": pilot.issued_count(p["id"])})
-
-
-def _csv_cell(value: str) -> str:
-    """Neutralise spreadsheet formulas in organizer-opened exports."""
-    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
-
-
-@server.custom_route("/api/pilot/{id}/links.csv", methods=["GET"])
-async def api_pilot_links(request: Request) -> Response:
-    p, err = _pilot_for(request, request.query_params.get("key"), allow_batch=True)
-    if err:
-        return err
-    out = io.StringIO()
-    w = csv.writer(out, lineterminator="\r\n")
-    w.writerow(["name", "email", "ticket", "type", "link"])
-    for r in pilot.issued_rows(p["id"]):
-        w.writerow([_csv_cell(r["name"]), _csv_cell(r["email"]), r["ticket"], _csv_cell(r["type"]),
-                    pilot.pass_link(r["serial"], r["auth_token"])])
-    return Response(out.getvalue(), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="{p["id"]}-links.csv"',
-                             "Cache-Control": "no-store"})
-
-
-@server.custom_route("/api/pilot/{id}/update", methods=["POST"])
-async def api_pilot_update(request: Request) -> Response:
-    body, err = await _json_body(request)
-    if err:
-        return err
-    p, err = _pilot_for(request, body.get("key"))
-    if err:
-        return err
-    try:
-        changes = pilot.validate_changes(body.get("changes"))
-    except ValueError as e:
-        return _error(str(e))
-    if not _pilot_disk_ok():
-        return _error(CAPACITY_ERROR, 503)
-    ip = _client_ip(request)
-    async with _pilot_lock(p["id"]):
-        merged = pilot.merge_changes(p["design_obj"], changes)
-        try:  # prove the new design builds before touching any stored pass
-            await anyio.to_thread.run_sync(
-                lambda: pkpass.build(pilot.fill(merged, pilot.SAMPLE_ROW), str(uuid.uuid4()), None),
-                limiter=BUILD_LIMITER)
-        except pass_builder.PassBuildError as e:
-            return _error(f"that change would not build: {e}")
-        pilot.save_design(p["id"], merged)
-        p["design_obj"] = merged
-        targets = [{**r, "serial": r["serial"]} for r in pilot.issued_rows(p["id"])]
-        if p["sample_serial"]:
-            targets.append({**pilot.SAMPLE_ROW, "serial": p["sample_serial"]})
-        done, errors = await rebuild_all(p, targets, ip)
-        failed = len(errors)
-        notified = await push_updates(done)
-    attendees = len(done) - (1 if p["sample_serial"] in done else 0)
-    result = {"updated": attendees, "notified_devices": notified}
-    if failed:
-        result["failed"] = failed
-    return JSONResponse(result)
-
-
-@server.custom_route("/pass/{serial}/{auth_token}", methods=["GET"])
-async def pilot_pass(request: Request) -> Response:
-    """The permanent attendee link: always the current version of the pass."""
-    row = db.get_pass(request.path_params["serial"])
-    token = request.path_params["auth_token"]
-    if row is None or not secrets.compare_digest(token, row["auth_token"]) or not pilot.is_pilot_serial(row["serial"]):
-        return Response("unknown or expired pass link", status_code=404)
-    return Response(row["pkpass"], media_type="application/vnd.apple.pkpass",
-                    headers={"Last-Modified": formatdate(row["updated"], usegmt=True), "Cache-Control": "no-cache",
-                             "Content-Disposition": 'inline; filename="pass.pkpass"'})
 
 
 # --- Card payments: prepaid pass credits through Dodo Payments (credits.py) ---

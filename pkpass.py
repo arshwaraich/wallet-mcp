@@ -1,5 +1,5 @@
 """Building a signed .pkpass from create_wallet_pass's parameters, shared by server.py (single passes) and
-pilot.py (organizer pilots and paid batches, including the pilot CLI, which must not import server).
+other tools that must not import server.
 
 PUBLIC_BASE_URL is baked into every updatable pass as its webServiceURL, so it must be the service's
 real value (WALLET_MCP_PUBLIC_URL): a pass built with the wrong one can never receive updates.

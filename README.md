@@ -75,7 +75,7 @@ Wallet in iOS 27 can scan a card or fill in a Standard, Membership or Event temp
 
 ## Privacy, terms and support
 
-walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus the contact email and x402 status every call must send. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Questions and bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
+walletmcppass.com is an independent project, not affiliated with Apple. Pass contents aren't written to the request log, and pass files are deleted when their link expires after 1 hour; the request log keeps only the time, IP address, pass style and organization name, plus the contact email and x402 status every call must send. Updatable passes are stored for their update window (1 hour by default, at most 30 days) and then deleted. Card payments go through Dodo Payments (merchant of record); unused credits are refundable within 30 days of purchase. Full terms, refunds and privacy: [walletmcppass.com/#terms](https://walletmcppass.com/#terms). Support and refunds: support@walletmcppass.com; bug reports: [GitHub issues](https://github.com/arshwaraich/wallet-mcp/issues).
 
 ## Why this exists
 
@@ -262,23 +262,6 @@ The facilitator verifies the payment before any work. It settles it on-chain aft
 | `WALLET_MCP_X402_PRICE` | `$0.01` |
 
 Coinbase's CDP facilitator also needs CDP API-key auth headers, which aren't wired in. `tests/test_x402.py` runs against a fake facilitator. `--live` also sends an unfunded payment to PayAI on mainnet, which must be refused for lack of balance.
-
-## Organizer pilots
-
-A free pilot for event organizers: one design, one updatable pass per attendee, issued from a CSV. Code: `pilot.py` (tables, key auth, CLI), `csv_clean.py`, `palette.py`, routes at the bottom of `server.py`. Nginx blocks: `deploy/nginx-pilot.conf`.
-
-```
-.venv/bin/python pilot.py new --org "Gala Co" --event "Gala 2026" --contact org@gala.co \
-    --event-end 2026-12-01T23:00:00+05:30 --design design.json [--max 2000] [--keep-colors]
-.venv/bin/python pilot.py list | show ID | preview ID OUT.json
-```
-
-`new` prints the organizer key (`<id>.<token>`, stored only as a sha256), the organizer URL and a sample pass link. Design strings may use `{name} {ticket} {type} {email}`. Colours are repaired (neon tamed, WCAG contrast) unless `--keep-colors`.
-
-- API: `GET /api/pilot/{id}?key=`, `POST .../clean`, `.../issue` (idempotent per ticket, <=1000 rows), `.../update`, `GET .../links.csv?key=`, `GET .../preview.png` (from `data/previews/<id>.png`), and the public attendee link `GET /pass/{serial}/{auth_token}`.
-- Attendee passes live in the normal `passes` table (expiry = event end + 7 days), so the PassKit web service and APNs push work as for any updatable pass. Pilot calls are logged with `source='pilot'`, `client='pilot:<id>'` and never count against the public free limits.
-- `clean` finds the header by heuristic; only if unsure it asks `claude -p --model haiku` (first 25 rows, mapping plan only; code applies it to every row). Needs `claude` on the service's PATH, otherwise it silently falls back to the heuristic.
-- Tests: `.venv/bin/python tests/test_pilot.py` (set `WALLET_MCP_MIN_FREE_DISK_GB=1` is done by the test itself).
 
 ## Capacity guards
 
