@@ -243,6 +243,25 @@ The facilitator verifies the payment before any work. It settles it on-chain aft
 
 Coinbase's CDP facilitator also needs CDP API-key auth headers, which aren't wired in. `tests/test_x402.py` runs against a fake facilitator. `--live` also sends an unfunded payment to PayAI on mainnet, which must be refused for lack of balance.
 
+## Paying by card: pass credits (Dodo Payments)
+
+For users without an x402 wallet. Dodo's smallest card charge is $0.50, so cards buy prepaid packs instead of
+paying per call: `"100"` (100 passes, $1), `"500"` ($5) or `"2000"` ($20), the same $0.01 a pass.
+
+1. `buy_pass_credits(pack, contact_email[, credit_key])` (REST `POST /api/credits`) returns a Dodo `checkout_url`
+   for the user to pay, plus a secret `credit_key` (`wpc_...`, shown once; send `credit_key` to top up instead).
+2. Dodo calls `POST /api/dodo/webhook` (Standard Webhooks signature, `DODO_PAYMENTS_WEBHOOK_KEY`); the payment
+   is re-read from Dodo's API, then the pack is added to the key once (replays are ignored). `refund.succeeded`
+   and `dispute.opened` take the pack back.
+3. Any paid call (past the free passes, or a batch) that sends `credit_key` spends 1 credit per pass, only after
+   the work is built (as with an x402 settlement). Paid refusals now offer both x402 and the card option.
+   `check_pass_credits(credit_key)` / `GET /api/credits` (Bearer) shows the balance.
+
+Only a sha256 of each key is stored. Config (`/etc/wallet-mcp/dodo.env`, root-only, loaded by the unit's
+`dodo.conf` drop-in): `DODO_PAYMENTS_API_KEY` plus the lines `dodo_setup.py` writes (`DODO_PRODUCT_100/500/2000`,
+`DODO_PAYMENTS_WEBHOOK_KEY`). All four must be set or card credits stay off. nginx: `deploy/nginx-credits.conf`.
+Tests: `tests/test_credits.py` (fake Dodo API).
+
 ## Organizer pilots
 
 A free pilot for event organizers: one design, one updatable pass per attendee, issued from a CSV. Code: `pilot.py` (tables, key auth, CLI), `csv_clean.py`, `palette.py`, routes at the bottom of `server.py`. Nginx blocks: `deploy/nginx-pilot.conf`.

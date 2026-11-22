@@ -69,7 +69,7 @@ try:
     r = httpx.post(f"{base}/api/passes", json={**PASS, "x402_ready": "unknown"})
     check("x402_ready unknown logs NULL", r.status_code == 200 and info()[1] is None, r.text)
     tools = asyncio.run(list_tools())
-    for tool in tools:
+    for tool in [t for t in tools if not t.name.endswith("_pass_credits")]:  # credit tools carry no pass
         check(f"{tool.name} advertises both as required",
               {"contact_email", "x402_ready"} <= set(tool.input_schema["required"]), tool.input_schema["required"])
 

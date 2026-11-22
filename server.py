@@ -41,6 +41,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 import anyio
 
 import apns
+import credits
 import csv_clean
 import db
 import pass_builder
@@ -73,6 +74,7 @@ MAX_UPDATABLE_HOURS = 30 * 24  # updatable passes are stored for 1 hour by defau
 DEFAULT_ICON_COLOR = pkpass.DEFAULT_ICON_COLOR
 
 db.init()
+credits.init()
 pilot.init()
 
 server = MCPServer(
@@ -90,6 +92,12 @@ server = MCPServer(
             'x402_payment argument, or in _meta["x402/payment"]). A payment is settled only after the pass is built, so a failed '
             "build is never charged. Setup guide: https://walletmcppass.com/#wallet-setup. Without x402, wait for the reset"
             if payments.enabled else ""
+        )
+        + (
+            ". Paid calls can also be paid by card: buy_pass_credits returns a checkout link for the user (packs "
+            f"{credits.PACKS_TEXT}) and a credit_key; send credit_key on later calls and each pass past the free "
+            "ones uses 1 credit. check_pass_credits shows the balance"
+            if credits.enabled else ""
         )
         + (
             ". For many passes from one design (event tickets for a guest list), use create_wallet_pass_batch: "
@@ -180,6 +188,7 @@ class Caller:
     payment: object = field(default=None, repr=False)  # the raw x402 payment, if one was sent
     contact_email: str | None = None  # from the caller
     x402_ready: bool | None = None  # from the caller
+    credit_key: str | None = field(default=None, repr=False)  # prepaid card credits (credits.py)
 
     @classmethod
     def from_mcp(cls, ctx: Context) -> "Caller":
@@ -210,10 +219,12 @@ class Caller:
         )
 
 
-    def with_payment_argument(self, payment) -> "Caller":
+    def with_payment_argument(self, payment, credit_key=None) -> "Caller":
         """The x402_payment tool argument / JSON body field. It exists because chat apps (Claude.ai,
         ChatGPT) let the model fill in arguments but not _meta or headers, so a payment signed by a
         wallet connector can only reach us this way. A _meta/header payment wins if both are sent."""
+        if credit_key is not None:
+            self = replace(self, credit_key=credit_key)
         if payment is None or self.payment is not None:
             return self
         return replace(self, payment=payment, x402=True)
@@ -285,6 +296,7 @@ async def create_wallet_pass(
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
     x402_payment: dict | str | None = None,
+    credit_key: str | None = None,
 ) -> dict:
     """Create a signed Apple Wallet pass (.pkpass) and return a link to download it.
 
@@ -447,6 +459,8 @@ async def create_wallet_pass(
         x402_payment: only after a refusal that asked for payment. The signed x402 payment for the
             requirements in that refusal (the PaymentPayload JSON object, or its base64), e.g. from
             a wallet connector's sign/pay tool. Same as sending it in _meta["x402/payment"].
+        credit_key: the user's prepaid card credits from buy_pass_credits (starts with wpc_). Only
+            spent on paid calls (past the free passes), 1 credit per pass, and only if the pass builds.
 
     """
     params = {k: v for k, v in locals().items() if k != "ctx"}
@@ -513,11 +527,12 @@ async def update_wallet_pass(
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
     x402_payment: dict | str | None = None,
+    credit_key: str | None = None,
 ) -> dict:
     """Change a pass made with create_wallet_pass(updatable=True); every iPhone that added it refreshes.
 
     Takes the serial_number and edit_token returned when the pass was created, the required
-    contact_email and x402_ready, plus any of create_wallet_pass's parameters (x402_payment included), with the same meanings. Each parameter given replaces the
+    contact_email and x402_ready, plus any of create_wallet_pass's parameters (x402_payment and credit_key included), with the same meanings. Each parameter given replaces the
     stored value completely (a fields list replaces the whole list, so resend unchanged fields
     too); parameters left out keep their current values. Clear a text value with "" and a list
     with []. To cancel a pass, set voided=True: Wallet marks it void on every iPhone.
@@ -543,7 +558,7 @@ async def update_wallet_pass(
 
 def _mcp_result(result: dict) -> dict | CallToolResult:
     """A paid call also returns the x402 receipt in _meta, where x402 MCP clients look for it."""
-    if "payment" not in result:
+    if "payment" not in result or result["payment"].get("method") == "pass_credits":
         return result
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(result, indent=2))],
@@ -574,7 +589,8 @@ class PassRejected(Exception):
 
 
 # create_wallet_pass parameters that are about the call (or the pass's identity and storage), not its design.
-_CALL_PARAMS = ("serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready", "x402_payment")
+_CALL_PARAMS = ("serial_number", "updatable", "updatable_hours", "contact_email", "x402_ready", "x402_payment",
+                "credit_key")
 
 
 def _create_pass(caller: Caller, request: dict) -> dict:
@@ -584,7 +600,7 @@ def _create_pass(caller: Caller, request: dict) -> dict:
     updatable, updatable_hours = request["updatable"], request["updatable_hours"]
     params = {k: v for k, v in request.items() if k not in _CALL_PARAMS}
     start = time.monotonic()
-    caller = caller.with_payment_argument(request["x402_payment"])
+    caller = caller.with_payment_argument(request["x402_payment"], request["credit_key"])
     caller = _with_caller_info(caller, request["contact_email"], request["x402_ready"], "create", style,
                                organization_name)
     paid = _gate(caller, 1, free_tier=True, tool="create_wallet_pass", path="/api/passes", action="create",
@@ -662,7 +678,7 @@ def _with_caller_info(caller: Caller, contact_email: str | None, x402_ready: boo
 
 def _add_x402_setup_hint(result: dict, caller: Caller, paid: bool = False) -> None:
     """Called after the successful call is logged, so the count includes it."""
-    if caller.x402_ready is not False or not payments.enabled or paid:
+    if caller.x402_ready is not False or not payments.enabled or paid or caller.credit_key:
         return
     left = db.free_remaining(caller.ip, caller.contact_email)
     if not 0 <= left <= HINT_WHEN_LEFT:
@@ -671,6 +687,8 @@ def _add_x402_setup_hint(result: dict, caller: Caller, paid: bool = False) -> No
             f"{left} free pass{'' if left == 1 else 'es'} left today.")
     result["free_passes_left_today"] = left
     result["x402_setup"] = {**X402_SETUP_HINT, "message": X402_SETUP_HINT["message"].format(left=lead)}
+    if credits.enabled:
+        result["x402_setup"]["card_option"] = _card_offer()
 
 
 def _is_placeholder_email(address: str) -> bool:
@@ -687,7 +705,7 @@ def _update_pass(caller: Caller, serial_number: str, edit_token: str, changes: d
         raise PassRejected(
             "unknown serial_number, wrong edit_token, or the pass's update window (updatable_hours) has ended", 404)
     contact_email, x402_ready = changes.pop("contact_email"), changes.pop("x402_ready")
-    caller = caller.with_payment_argument(changes.pop("x402_payment", None))
+    caller = caller.with_payment_argument(changes.pop("x402_payment", None), changes.pop("credit_key", None))
     params = json.loads(row["params"])
     changes = {k: v for k, v in changes.items() if v is not None}
     if not changes:
@@ -746,7 +764,7 @@ def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, 
     """Limits + payment for `count` passes. Returns the verified (not yet charged) payment, or None for a
     free call; otherwise logs the refusal and raises PassRejected. tool/path name the MCP tool and REST
     route the x402 resource points at."""
-    if not free_tier and not payments.enabled:
+    if not free_tier and not (payments.enabled or credits.enabled):
         _refuse(caller, action, style, org, "batches are paid and payments are not set up on this server", 503)
     if not _pilot_disk_ok():
         logger.error("refusing passes: less than %d GB of disk free", MIN_FREE_DISK_BYTES // 1024 ** 3)
@@ -760,18 +778,25 @@ def _gate(caller: Caller, count: int, *, free_tier: bool, tool: str, path: str, 
         reason = db.check_rate_limit(caller.ip, db.is_exempt(caller.contact_email), caller.contact_email)
         if reason is None:
             return None
-        if not payments.enabled:
+        if not payments.enabled and not credits.enabled:
             _refuse(caller, action, style, org, reason, 429)
     over = db.check_paid_limit(caller.ip, count)
     if over:
         _refuse(caller, action, style, org, over, 429)
-    if caller.payment is not None:
+    if caller.credit_key is not None and credits.enabled and caller.payment is None:
+        try:
+            return credits.hold(caller.credit_key, count, action)
+        except credits.CreditError as e:
+            reason = f"{reason}; {e}" if reason else str(e)
+    if caller.payment is not None and payments.enabled:
         try:
             return payments.verify(caller.payment, count)
         except payments.PaymentError as e:
             reason = str(e)
     if not free_tier:
         reason = _batch_lead(reason, count)
+    if not payments.enabled:  # card credits only
+        _refuse(caller, action, style, org, reason, PassRejected(f"{reason}. {_card_offer()}", 402))
     _refuse(caller, action, style, org, reason, _payment_required(caller, tool, path, reason, count, free_tier))
 
 
@@ -781,6 +806,15 @@ def _refuse(caller: Caller, action: str, style: str, org: str, error: str, rejec
     _log(caller, style=style, organization_name=org, success=False, error=error, duration_ms=0,
          serial_number=None, action=action, refused=True)
     raise rejection if isinstance(rejection, PassRejected) else PassRejected(error, rejection)
+
+
+def _card_offer() -> str:
+    """How to pay by card instead of x402, appended to paid refusals when credits are on."""
+    if not credits.enabled:
+        return ""
+    return (f"No crypto wallet? Pay by card instead: call buy_pass_credits (REST: POST /api/credits) with a pack "
+            f"({credits.PACKS_TEXT}), give your user the checkout_url to pay, then retry this exact call with the "
+            "credit_key it returned (1 credit per pass). Tell the user to keep the credit_key: it works in any chat.")
 
 
 def _batch_lead(rejection: str | None, count: int) -> str:
@@ -801,12 +835,14 @@ def _payment_required(caller: Caller, tool: str, path: str, reason: str, count: 
                    f"via x402): retry this exact call with {how}. If this agent has no wallet yet, tell your user: AI "
                    f"agents can now pay for things on their own. Setting up a Coinbase Agentic Wallet for this agent "
                    f"once lets it pay any app or service that accepts agent payments, not just this one; here $1 "
-                   f"covers 100 passes. Wallet setup instructions: {X402_GUIDE_URL}")
+                   f"covers 100 passes. Wallet setup instructions: {X402_GUIDE_URL}. {_card_offer()}")
     else:
         message = (f"{reason} (USDC on Base, via x402). Retry this exact call with {how}; nothing is charged unless "
                    f"every pass builds. If this agent has no wallet yet, tell your user: setting up a Coinbase Agentic "
                    f"Wallet once lets the agent pay for things like this on its own. Wallet setup instructions: "
-                   f"{X402_GUIDE_URL}")
+                   f"{X402_GUIDE_URL}. {_card_offer()}")
+    if not payments.enabled:
+        return PassRejected(message, 402)
     try:
         return PassRejected(message, 402, payments.payment_required(resource, message, count))
     except Exception:
@@ -820,6 +856,12 @@ def _settle(verified, undo):
     If it fails, undo() rolls the stored work back and the PaymentError is re-raised (not charged)."""
     if verified is None:
         return None
+    if isinstance(verified, credits.Hold):
+        try:
+            return credits.spend(verified)
+        except credits.CreditError as e:
+            undo()
+            raise payments.PaymentError(str(e)) from None
     try:
         return payments.settle(verified)
     except Exception:
@@ -1484,10 +1526,10 @@ def _batch_links_csv(p: dict, key: str) -> str:
 
 
 async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, contact_email, x402_ready,
-                        x402_payment) -> dict:
+                        x402_payment, credit_key=None) -> dict:
     """New batch (design + event_end) or more passes for an existing one (batch_key)."""
     tool, start = "create_wallet_pass_batch", time.monotonic()
-    caller = caller.with_payment_argument(x402_payment)
+    caller = caller.with_payment_argument(x402_payment, credit_key)
     d = design if isinstance(design, dict) else {}
     caller = _with_caller_info(caller, contact_email, x402_ready, "create", str(d.get("style") or "eventTicket"),
                                str(d.get("organization_name") or "batch"))
@@ -1602,13 +1644,14 @@ async def _create_batch(caller: Caller, *, design, rows, event_end, batch_key, c
     return result
 
 
-async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x402_ready, x402_payment) -> dict:
+async def _update_batch(caller: Caller, *, batch_key, changes, contact_email, x402_ready, x402_payment,
+                        credit_key=None) -> dict:
     """Merge changes into a batch's design, re-sign every live pass in it, and push them to iPhones.
     Charged per live pass, and only once every new version is built: they are built into db.pass_staging,
     the payment is settled, and then they and the new design go live in one transaction (#5). A failed
     build or settlement leaves the passes and the saved design as they were."""
     tool, start = "update_wallet_pass_batch", time.monotonic()
-    caller = caller.with_payment_argument(x402_payment)
+    caller = caller.with_payment_argument(x402_payment, credit_key)
     p = _auth_batch(batch_key)
     if p is None:
         raise PassRejected("unknown batch_key", 404)
@@ -1701,6 +1744,7 @@ async def create_wallet_pass_batch(
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
     x402_payment: dict | str | None = None,
+    credit_key: str | None = None,
 ) -> dict:
     """Create one Apple Wallet pass per attendee from a single design, e.g. tickets for a guest list.
 
@@ -1725,7 +1769,8 @@ async def create_wallet_pass_batch(
             Defaults: style "eventTicket", barcode_message "{ticket}". Leave out with batch_key.
         event_end: for a new batch, when the event ends (ISO 8601, within a year). Leave out with batch_key.
         batch_key: to add attendees to a batch made earlier, the batch_key it returned.
-        contact_email, x402_ready, x402_payment: as for create_wallet_pass (all calls are paid here).
+        contact_email, x402_ready, x402_payment, credit_key: as for create_wallet_pass (all calls are
+            paid here: credit_key spends 1 card credit per new pass instead of an x402 payment).
 
     Returns {batch_key (new batch only: it can't be recovered, give it to the user), batch_id,
     passes: [{name, ticket, type, email, link, new}], created, reused, issued_total, charged,
@@ -1735,7 +1780,7 @@ async def create_wallet_pass_batch(
     try:
         return _mcp_result(await _create_batch(
             caller, design=design, rows=rows, event_end=event_end, batch_key=batch_key,
-            contact_email=contact_email, x402_ready=x402_ready, x402_payment=x402_payment))
+            contact_email=contact_email, x402_ready=x402_ready, x402_payment=x402_payment, credit_key=credit_key))
     except PassRejected as e:
         return _mcp_rejection(e)
 
@@ -1759,12 +1804,14 @@ async def update_wallet_pass_batch(
     contact_email: str | None = None,
     x402_ready: bool | Literal["unknown"] | None = None,
     x402_payment: dict | str | None = None,
+    credit_key: str | None = None,
 ) -> dict:
     """Change every pass in a batch made with create_wallet_pass_batch (e.g. a new time or venue);
     every iPhone that added one refreshes within seconds.
 
     Paid: {price} per pass in the batch, as one x402 payment (refused first with the exact amount;
-    retry unchanged with x402_payment). Nothing is charged if the change doesn't build.
+    retry unchanged with x402_payment, or send credit_key: 1 card credit per pass). Nothing is charged if
+    the change doesn't build.
 
     Each field list given replaces that list in the design (resend unchanged fields too; strings may
     use {name} {ticket} {type} {email}). change_message (e.g. "Doors now open at %@") is shown on the
@@ -1773,12 +1820,12 @@ async def update_wallet_pass_batch(
     Returns {batch_id, updated, notified_devices, charged, payment}.
     """
     changes = {k: v for k, v in locals().items()
-               if k not in ("ctx", "batch_key", "contact_email", "x402_ready", "x402_payment")}
+               if k not in ("ctx", "batch_key", "contact_email", "x402_ready", "x402_payment", "credit_key")}
     caller = Caller.from_mcp(ctx)
     try:
         return _mcp_result(await _update_batch(
             caller, batch_key=batch_key, changes=changes, contact_email=contact_email, x402_ready=x402_ready,
-            x402_payment=x402_payment))
+            x402_payment=x402_payment, credit_key=credit_key))
     except PassRejected as e:
         return _mcp_rejection(e)
 
@@ -1789,8 +1836,8 @@ for _tool in (create_wallet_pass_batch, update_wallet_pass_batch):
 _advertise_caller_info_as_required(create_wallet_pass_batch, update_wallet_pass_batch)
 
 
-_BATCH_CREATE_KEYS = {"rows", "design", "event_end", "contact_email", "x402_ready", "x402_payment"}
-_BATCH_UPDATE_KEYS = {*pilot.UPDATE_KEYS, "contact_email", "x402_ready", "x402_payment"}
+_BATCH_CREATE_KEYS = {"rows", "design", "event_end", "contact_email", "x402_ready", "x402_payment", "credit_key"}
+_BATCH_UPDATE_KEYS = {*pilot.UPDATE_KEYS, "contact_email", "x402_ready", "x402_payment", "credit_key"}
 
 
 def _batch_key(request: Request) -> str | None:
@@ -1850,7 +1897,8 @@ async def api_update_batch(request: Request) -> Response:
     return await _batch_api(lambda: _update_batch(caller, batch_key=key, changes=changes,
                                                   contact_email=body.get("contact_email"),
                                                   x402_ready=body.get("x402_ready"),
-                                                  x402_payment=body.get("x402_payment")))
+                                                  x402_payment=body.get("x402_payment"),
+                                                  credit_key=body.get("credit_key")))
 
 
 @server.custom_route("/api/batches/{id}", methods=["GET"])
@@ -1869,6 +1917,122 @@ async def api_get_batch(request: Request) -> Response:
                         headers={"Cache-Control": "no-store"})
 
 
+
+
+# --- Card payments: prepaid pass credits through Dodo Payments (credits.py) ---
+
+def _buy_credits(caller: Caller, pack, contact_email, credit_key) -> dict:
+    if not credits.enabled:
+        raise PassRejected("card payments are not set up on this server", 503)
+    if not isinstance(contact_email, str) or not EMAIL_RE.fullmatch(contact_email) or _is_placeholder_email(contact_email):
+        raise PassRejected("contact_email must be the user's real email address (Dodo sends the receipt there)", 400)
+    try:
+        out = credits.start_checkout(str(pack), contact_email, caller.ip, credit_key)
+    except credits.CreditError as e:
+        raise PassRejected(str(e), 400) from None
+    except Exception:
+        logger.error("dodo checkout failed: %s", traceback.format_exc())
+        raise PassRejected("the card checkout is unavailable right now; try again later", 503) from None
+    out["next_steps"] = (
+        "Give the user checkout_url to pay by card (Dodo Payments, our merchant of record). Credits appear on the "
+        "credit_key within a minute of payment; check with check_pass_credits. Then send credit_key with "
+        "create_wallet_pass / update_wallet_pass / the batch tools: each pass past the free ones uses 1 credit."
+        + (" Tell the user to save the credit_key somewhere safe: it is shown only now, can't be recovered, "
+           "and works from any chat or app." if "credit_key" in out else ""))
+    logger.info("checkout started: pack %s from %s", pack, caller.ip)
+    return out
+
+
+@server.tool(
+    title="Buy Apple Wallet pass credits by card",
+    annotations=ToolAnnotations(title="Buy Apple Wallet pass credits by card", read_only_hint=False,
+                                destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+)
+async def buy_pass_credits(ctx: Context, pack: Literal["100", "500", "2000"], contact_email: str,
+                           credit_key: str | None = None) -> dict:
+    """Start a card payment for prepaid pass credits, for users without an x402 crypto wallet.
+
+    Packs: "100" (100 passes for $1), "500" (500 for $5), "2000" (2000 for $20). Nothing is charged
+    by this call: it returns a checkout_url that the user opens and pays themselves. Only call it
+    when the user asked to pay by card or agreed to buy a pack.
+
+    Args:
+        pack: "100", "500" or "2000".
+        contact_email: the user's email; the checkout and receipt use it. Ask the user for it.
+        credit_key: to top up an existing credit_key; leave out to get a new one.
+
+    Returns {credit_key (new keys only: shown once, give it to the user to keep), checkout_url,
+    pack, credits_left, next_steps}. Credits are added within a minute of payment; then pass
+    credit_key to create_wallet_pass, update_wallet_pass or the batch tools.
+    """
+    caller = Caller.from_mcp(ctx)
+    try:
+        return await anyio.to_thread.run_sync(lambda: _buy_credits(caller, pack, contact_email, credit_key))
+    except PassRejected as e:
+        raise ToolError(e.message) from None
+
+
+@server.tool(
+    title="Check Apple Wallet pass credits",
+    annotations=ToolAnnotations(title="Check Apple Wallet pass credits", read_only_hint=True,
+                                destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+)
+async def check_pass_credits(ctx: Context, credit_key: str) -> dict:
+    """Credits left on a credit_key from buy_pass_credits, and its recent purchases
+    (status pending until the card payment succeeds, then paid).
+
+    Returns {credits_left, purchases: [{pack, passes, status, created, paid_at}]}.
+    """
+    info = credits.account(credit_key)
+    if info is None:
+        raise ToolError("unknown credit_key")
+    return info
+
+
+@server.custom_route("/api/credits", methods=["POST"])
+async def api_buy_credits(request: Request) -> Response:
+    """{pack, contact_email[, credit_key]} -> a Dodo checkout_url (and a new credit_key)."""
+    body, err = await _json_body(request)
+    if err or (err := _reject_unknown(body, {"pack", "contact_email", "credit_key"})):
+        return err
+    caller = Caller.from_api(request)
+    try:
+        return JSONResponse(await anyio.to_thread.run_sync(
+            lambda: _buy_credits(caller, body.get("pack"), body.get("contact_email"), body.get("credit_key"))),
+            headers={"Cache-Control": "no-store"})
+    except PassRejected as e:
+        return _error(e.message, e.status)
+
+
+@server.custom_route("/api/credits", methods=["GET"])
+async def api_check_credits(request: Request) -> Response:
+    """Balance of the credit_key sent as 'Authorization: Bearer <credit_key>'."""
+    info = credits.account(_bearer(request) or "")
+    if info is None:
+        return _error("send a valid credit_key as 'Authorization: Bearer <credit_key>'", 401)
+    return JSONResponse(info, headers={"Cache-Control": "no-store"})
+
+
+@server.custom_route("/api/dodo/webhook", methods=["POST"])
+async def dodo_webhook(request: Request) -> Response:
+    """Dodo Payments events (Standard Webhooks signed). 2xx tells Dodo to stop retrying."""
+    if not credits.WEBHOOK_KEY:
+        return _error("not configured", 503)
+    body = await request.body()
+    if len(body) > 1_000_000:
+        return _error("too large", 413)
+    try:
+        event = credits.verify_webhook(request.headers, body)
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.warning("dodo webhook rejected: %s", e)
+        return _error("invalid signature", 401)
+    try:
+        outcome = await anyio.to_thread.run_sync(lambda: credits.handle_event(event))
+    except Exception:
+        logger.error("dodo webhook failed (Dodo will retry): %s", traceback.format_exc())
+        return _error("temporary failure", 500)
+    logger.info("dodo webhook %s: %s", event.get("type"), outcome)
+    return JSONResponse({"ok": True, "outcome": outcome})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8400"))
